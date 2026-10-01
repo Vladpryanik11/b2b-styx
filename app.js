@@ -11,6 +11,7 @@ const SESSION_URL = "/api/session";
 const ADDRESS_HINT = "Начните вводить адрес — появятся подсказки.";
 // Значения переключателя юрлиц: «Все юрлица» и пункт «Добавить юрлицо…».
 const ALL_COMPANIES = "all";
+const MAX_COMPANIES = 30; // как на сервере (server/profile.js)
 const ADD_COMPANY = "add";
 
 const demoCompanies = [
@@ -138,7 +139,8 @@ function normalizeCompanies(candidate) {
   const seen = new Set();
   return candidate
     .filter((item) => item && typeof item === "object" && typeof item.inn === "string" && item.inn)
-    .map((item) => ({
+    // Сырой ответ поиска (data) в кабинете не нужен: он только раздувает сохранение юрлиц.
+    .map(({ data: _data, demo: _demo, ...item }) => ({
       ...item,
       id: typeof item.id === "string" && item.id ? item.id : `company-${companyKey(item)}`,
       deliveryAddresses: normalizeAddresses(item.deliveryAddresses)
@@ -261,16 +263,27 @@ function scheduleAccountSync() {
   accountSyncTimer = setTimeout(syncAccount, 400);
 }
 
+// Возвращает true, если на сервере актуальная версия юрлиц и адресов.
 async function syncAccount() {
   const snapshot = accountSnapshot();
-  if (!snapshot || snapshot === lastSyncedAccount) return;
+  if (!snapshot || snapshot === lastSyncedAccount) return true;
   const { ok, status, data } = await apiRequest("PUT", "/api/account", { account: JSON.parse(snapshot) });
   if (ok) {
     lastSyncedAccount = snapshot;
-    return;
+    return true;
   }
-  if (status === 401 || status === 403) return endServerSession(data.error || "Сессия закончилась. Войдите снова.");
+  if (status === 401 || status === 403) {
+    endServerSession(data.error || "Сессия закончилась. Войдите снова.");
+    return false;
+  }
   showToast(`Изменения не сохранены на сервере: ${data.error || "попробуйте ещё раз"}`);
+  return false;
+}
+
+// Отправить отложенное сохранение сейчас, не дожидаясь паузы.
+function flushAccountSync() {
+  clearTimeout(accountSyncTimer);
+  return syncAccount();
 }
 
 // Ответ сервера с пользователем превращается в тот же store, с которым работает весь кабинет.
@@ -372,8 +385,10 @@ async function searchCompanies(query, signal) {
       headers: { Accept: "application/json" },
       signal
     });
-    // 404 — прокси не запущен, 503 — не задан DADATA_TOKEN: в обоих случаях работаем на тестовых данных.
-    if (response.status === 404 || response.status === 503) return demoSearch(value);
+    // Прототип без сервера: 404 — прокси не запущен, 503 — не задан ключ поиска, работаем на тестовых данных.
+    // На рабочем сервере тестовые организации не подставляем: зарегистрироваться можно только на настоящую.
+    // Исключение — сервер, запущенный на своём компьютере для проверки (localhost).
+    if (allowTestCompanies() && (response.status === 404 || response.status === 503)) return demoSearch(value);
     if (!response.ok) return { error: true };
     const payload = await response.json();
     const suggestions = payload.suggestions || payload.data || payload;
@@ -381,10 +396,12 @@ async function searchCompanies(query, signal) {
   } catch (error) {
     if (error.name === "AbortError") return null;
     // Сервер недоступен (например, страница открыта как файл) — локальный fallback для проверки прототипа.
-    return demoSearch(value);
+    return allowTestCompanies() ? demoSearch(value) : { error: true };
   }
   return [];
 }
+
+const allowTestCompanies = () => !serverMode || ["localhost", "127.0.0.1"].includes(location.hostname);
 
 function demoSearch(value) {
   const normalized = value.toLowerCase();
@@ -600,7 +617,7 @@ function renderOrders() {
   $("#orders-count").textContent = orders.length;
   $("#orders-active").textContent = active;
   $("#orders-completed").textContent = completed;
-  const sum = orders.reduce((acc, order) => acc + (typeof order.total === "number" ? order.total : 0), 0);
+  const sum = orders.filter((order) => order.status !== CANCELLED_STATUS).reduce((acc, order) => acc + (typeof order.total === "number" ? order.total : 0), 0);
   $("#orders-sum").textContent = formatPrice(sum);
   const empty = `<div class="empty-state">${companies().length > 1 && !isAllCompanies() ? "У этого юрлица пока нет заказов." : "У вас пока нет заказов."} Создайте первый заказ, и он появится здесь.</div>`;
   const rows = orders.slice().reverse().map(orderRow).join("") || empty;
@@ -665,6 +682,11 @@ function openModal(id, focusSelector) {
 
 function closeModal({ restoreFocus = true } = {}) {
   if (!activeModal) return;
+  // Незавершённые поиски не должны показать результаты в уже закрытом окне.
+  clearTimeout(companyAddTimer);
+  companyAddController?.abort();
+  clearTimeout(addressTimer);
+  addressController?.abort();
   activeModal.classList.add("is-hidden");
   activeModal.setAttribute("aria-hidden", "true");
   activeModal = null;
@@ -994,6 +1016,12 @@ async function handleCreateOrder(event) {
   };
   submitButton.disabled = true;
   setMessage("#order-message", "Отправляем заказ…");
+  // Только что добавленное юрлицо должно попасть на сервер раньше заказа на него.
+  if (serverMode && !(await flushAccountSync())) {
+    submitButton.disabled = false;
+    setMessage("#order-message", "Не удалось сохранить юрлица на сервере. Проверьте соединение и попробуйте ещё раз.");
+    return;
+  }
   const result = serverMode ? await sendServerOrder(order) : await sendOrder(order, company);
   if (result.order) Object.assign(order, result.order);
   submitButton.disabled = false;
@@ -1137,7 +1165,8 @@ function saveDeliveryAddress({ companyId = activeCompany()?.id, id = null, label
   const list = company.deliveryAddresses || [];
   const existing = id ? list.find((item) => item.id === id) : list.find((item) => item.address === address);
   if (existing) {
-    existing.label = label || existing.label;
+    // При правке адреса название можно и стереть; при сохранении адреса из заказа прежнее название сохраняется.
+    existing.label = id ? label : label || existing.label;
     existing.address = address;
     if (isDefault) list.forEach((item) => { item.isDefault = item === existing; });
   } else {
@@ -1193,6 +1222,10 @@ function openAddressModal(id = null, companyId = activeCompany()?.id) {
   $("#address-edit-label").value = item?.label || "";
   $("#address-edit-value").value = item?.address || "";
   $("#address-edit-default").checked = item ? item.isDefault : !deliveryAddresses(addressCompanyId).length;
+  // Основной адрес есть всегда: снять отметку можно, только выбрав основным другой адрес.
+  const onlyDefault = item ? item.isDefault : !deliveryAddresses(addressCompanyId).length;
+  $("#address-edit-default").disabled = onlyDefault;
+  $("#address-default-hint").hidden = !onlyDefault;
   $("#address-modal .eyebrow").textContent = companies().length > 1 ? `Адреса доставки · ${companyTitle(companyById(addressCompanyId))}` : "Адреса доставки";
   setAddressHint(ADDRESS_HINT, "", "saved");
   setMessage("#address-message", "");
@@ -1253,6 +1286,9 @@ function handleAddressAction(button) {
 // ---------- Добавление юрлица по ИНН ----------
 
 function openCompanyModal() {
+  clearTimeout(companyAddTimer);
+  companyAddController?.abort();
+  companyAddController = null;
   $("#company-add-query").value = "";
   $("#company-add-results").innerHTML = "";
   companyAddItems = [];
@@ -1278,6 +1314,10 @@ function renderCompanyResults(items) {
 function addCompany(item) {
   if (companies().some((company) => companyKey(company) === companyKey(item))) {
     setMessage("#company-message", "Это юрлицо уже есть в кабинете.");
+    return;
+  }
+  if (companies().length >= MAX_COMPANIES) {
+    setMessage("#company-message", `В кабинете может быть не больше ${MAX_COMPANIES} юрлиц.`);
     return;
   }
   const { demo: _demo, ...clean } = item;
@@ -1420,9 +1460,8 @@ async function handleRegister(event) {
     setMessage("#register-message", "Проверьте email.");
     return;
   }
-  const minLength = serverMode ? 8 : 6;
-  if (password.length < minLength) {
-    setMessage("#register-message", `Пароль должен быть не короче ${minLength} символов.`);
+  if (password.length < 8) {
+    setMessage("#register-message", "Пароль должен быть не короче 8 символов.");
     return;
   }
   if (password !== confirmation) {
@@ -1432,6 +1471,11 @@ async function handleRegister(event) {
   if (serverMode) return registerOnServer(event, { name, email, password });
   if (store.account?.user?.email === email) {
     setMessage("#register-message", "Этот email уже зарегистрирован. Войдите в кабинет.");
+    return;
+  }
+  // Прототип хранит один кабинет на браузер: новая регистрация заменяет прежний вместе с заказами — только с согласия.
+  if (store.account && !window.confirm(`В этом браузере уже есть кабинет ${store.account.user.email}${store.orders.length ? ` с заказами (${store.orders.length})` : ""}. Заменить его новым? Прежний кабинет и его заказы удалятся.`)) {
+    setMessage("#register-message", `Войдите как ${store.account.user.email} или подтвердите замену кабинета.`);
     return;
   }
 
@@ -1689,6 +1733,7 @@ function bindEvents() {
     const input = $(button.dataset.passwordToggle);
     input.type = input.type === "password" ? "text" : "password";
     button.textContent = input.type === "password" ? "Показать" : "Скрыть";
+    button.setAttribute("aria-label", input.type === "password" ? "Показать пароль" : "Скрыть пароль");
   }));
 
   $("#company-query").addEventListener("input", (event) => {
@@ -1768,7 +1813,11 @@ function bindEvents() {
     if (action === "logout") {
       if (serverMode) {
         apiRequest("POST", "/api/auth/logout", {});
+        // При выходе корзина и промокод не переходят к следующему, кто войдёт с этого компьютера.
+        store.cart = {};
+        resetPromo();
         endServerSession("");
+        saveStore();
         writeView(null);
         showToast("Вы вышли из кабинета");
         return;

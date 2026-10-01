@@ -173,10 +173,13 @@ function openDb(file = ":memory:") {
     setMailStatus: (id, mailStatus) => run("UPDATE orders SET mail_status = ?, updated_at = ? WHERE id = ?", mailStatus, now(), id),
 
     // ---------- Резервная копия ----------
+    // Копия пишется во временный файл и только потом заменяет прежнюю: сбой не оставит день без копии.
     backupTo(file) {
       fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
-      if (fs.existsSync(file)) fs.rmSync(file);
-      db.exec(`VACUUM INTO '${String(file).replace(/'/g, "''")}'`);
+      const temp = `${file}.tmp`;
+      if (fs.existsSync(temp)) fs.rmSync(temp);
+      db.exec(`VACUUM INTO '${String(temp).replace(/'/g, "''")}'`);
+      fs.renameSync(temp, file);
     }
   };
 }

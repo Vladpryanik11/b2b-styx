@@ -4,6 +4,7 @@ const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const { createServer } = require("../server.js");
+const { hashPassword, newToken } = require("../server/auth");
 
 const TOKEN = "test-token";
 const SECRET = "test-secret";
@@ -51,17 +52,34 @@ before(async () => {
 
 after(() => fakeDadata.close());
 
+// Проверка адреса платная и доступна только вошедшему клиенту: в каждом тесте заводим клиента с сессией.
+let sessionCookie = "";
 async function withApp(overrides, run) {
   const cfg = { token: TOKEN, secret: SECRET, partyUrl: `${fakeUrl}/party`, addressUrl: `${fakeUrl}/address`, cleanUrl: `${fakeUrl}/clean`, ...overrides };
-  const app = createServer(cfg);
+  const deps = {};
+  const app = createServer(cfg, deps);
+  const user = deps.db.createUser({ email: "anna@example.ru", name: "Анна", passwordHash: hashPassword("strong-pass-1"), status: "active" });
+  const { token, hash } = newToken();
+  deps.db.createSession(hash, user.id, 60 * 60 * 1000);
+  sessionCookie = `styx_session=${token}`;
   const base = await listen(app);
   try { await run(base); } finally { app.close(); }
 }
 
-const cleanAddress = (base, body) => fetch(`${base}/api/dadata/clean-address`, {
+const cleanAddress = (base, body, { cookie = sessionCookie } = {}) => fetch(`${base}/api/dadata/clean-address`, {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: { "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
   body: typeof body === "string" ? body : JSON.stringify(body)
+});
+
+test("проверка адреса без входа в кабинет не вызывает платный метод DaData", async () => {
+  await withApp({}, async (base) => {
+    const before = seen.length;
+    assert.equal((await cleanAddress(base, { address: "мск сухонска 11" }, { cookie: "" })).status, 401);
+    const foreign = await fetch(`${base}/api/dadata/clean-address`, { method: "POST", headers: { "Content-Type": "application/json", Origin: "https://evil.example", Cookie: sessionCookie }, body: JSON.stringify({ address: "мск" }) });
+    assert.equal(foreign.status, 403);
+    assert.equal(seen.length, before);
+  });
 });
 
 test("поиск Клиента по ИНН возвращает только Реквизиты", async () => {

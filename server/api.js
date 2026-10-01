@@ -1,6 +1,6 @@
 // API кабинета: вход и регистрация, профиль, заказы клиента и кабинет менеджера.
 // Сессия — HttpOnly cookie; пароли — scrypt; все данные — в SQLite (server/db.js).
-const { hashPassword, verifyPassword, newToken, tokenHash, passwordProblem, parseCookies, sessionCookie, createRateLimiter } = require("./auth");
+const { hashPasswordAsync, verifyPasswordAsync, DUMMY_HASH, newToken, tokenHash, passwordProblem, parseCookies, sessionCookie, createRateLimiter } = require("./auth");
 const { normalizeProfile, normalizeCompany, text } = require("./profile");
 const { normalizeOrder, splitOrder, buildOrderBlanks, managerMessage, clientMessage, ENTITIES } = require("./orders");
 
@@ -29,15 +29,23 @@ function sendJson(res, status, body, headers = {}) {
   res.end(JSON.stringify(body));
 }
 
+// Тело собирается из байтов целиком и только потом декодируется: русская буква на стыке двух пакетов не портится.
+// Принимается только JSON-объект; null, массив или строка — ошибка 400, а не падение обработчика.
 function readJson(req, limit = MAX_JSON) {
   return new Promise((resolve, reject) => {
-    let body = "";
+    const chunks = [];
+    let size = 0;
     req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > limit) { reject(new HttpError(413, "Слишком большой запрос")); req.destroy(); }
+      size += chunk.length;
+      if (size <= limit) chunks.push(chunk);
     });
     req.on("end", () => {
-      try { resolve(body ? JSON.parse(body) : {}); } catch { reject(new HttpError(400, "Некорректный запрос")); }
+      if (size > limit) return reject(new HttpError(413, "Слишком большой запрос"));
+      const body = Buffer.concat(chunks).toString("utf8");
+      let parsed;
+      try { parsed = body ? JSON.parse(body) : {}; } catch { return reject(new HttpError(400, "Некорректный запрос")); }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return reject(new HttpError(400, "Некорректный запрос"));
+      resolve(parsed);
     });
     req.on("error", reject);
   });
@@ -75,15 +83,29 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
   const mail = cfg.mail || {};
   const appUrl = (cfg.appUrl || "").replace(/\/$/, "");
 
-  const clientIp = (req) => (cfg.trustProxy ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() : "") || req.socket.remoteAddress || "";
+  // За прокси адрес клиента — последний в X-Forwarded-For: его дописывает сам прокси, а начало списка клиент может подделать.
+  const clientIp = (req) => (cfg.trustProxy ? String(req.headers["x-forwarded-for"] || "").split(",").pop().trim() : "") || req.socket.remoteAddress || "";
   const isSecure = (req) => cfg.cookieSecure || (cfg.trustProxy && req.headers["x-forwarded-proto"] === "https");
   const baseUrl = (req) => appUrl || `${isSecure(req) ? "https" : "http"}://${req.headers.host}`;
+  // Ссылки в письмах строятся только от APP_URL: заголовок Host присылает браузер, и подделанный Host
+  // увёл бы ссылку сброса пароля на чужой сайт. Без APP_URL ссылка ведёт на localhost (для локальной проверки).
+  const linkBase = () => appUrl || `http://localhost:${cfg.port || 8080}`;
+
+  // Неверные настройки почты (например, испорченный SMTP_URL) не роняют сервер: письмо просто считается неотправленным.
+  function transport() {
+    try {
+      return getTransport();
+    } catch (error) {
+      console.error("Mail transport misconfigured:", error.message);
+      return null;
+    }
+  }
 
   async function sendMail(message) {
-    const transport = getTransport();
-    if (!transport) return false;
+    const mailer = transport();
+    if (!mailer) return false;
     try {
-      await transport.sendMail({ from: mail.from, ...message });
+      await mailer.sendMail({ from: mail.from, ...message });
       return true;
     } catch (error) {
       console.error("Mail failed:", error.message);
@@ -139,11 +161,13 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     if (!company) throw new HttpError(400, "Выберите организацию из подсказок.");
     if (body.consent !== true) throw new HttpError(400, "Нужно согласие на обработку персональных данных.");
     if (db.userByEmail(email)) throw new HttpError(409, "Этот email уже зарегистрирован. Войдите в кабинет или восстановите пароль.");
+    const passwordHash = await hashPasswordAsync(body.password);
+    if (db.userByEmail(email)) throw new HttpError(409, "Этот email уже зарегистрирован. Войдите в кабинет или восстановите пароль.");
 
     const status = cfg.requireApproval ? "pending" : "active";
     const user = db.createUser({
       email, name, phone, status,
-      passwordHash: hashPassword(body.password),
+      passwordHash,
       profile: { companies: [company], activeCompanyId: company.id },
       consentAt: new Date().toISOString()
     });
@@ -156,7 +180,7 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
         company.address ? `Адрес: ${company.address}` : null,
         `Контакт: ${name}, ${email}${phone ? `, ${phone}` : ""}`,
         "",
-        `Кабинет менеджера: ${baseUrl(req)}/admin`
+        `Кабинет менеджера: ${linkBase()}/admin`
       ].filter((line) => line !== null).join("\n")
     });
     if (status === "pending") return sendJson(res, 201, { status, message: "Заявка отправлена. Менеджер STYX проверит организацию и откроет кабинет — мы пришлём письмо." });
@@ -169,7 +193,8 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     const key = `${clientIp(req)}|${email}`;
     if (!loginLimiter.hit(key)) throw new HttpError(429, MESSAGES.tooMany);
     const user = db.userByEmail(email);
-    if (!user || !verifyPassword(String(body.password || ""), user.passwordHash)) throw new HttpError(401, MESSAGES.badLogin);
+    const valid = await verifyPasswordAsync(String(body.password || ""), user ? user.passwordHash : DUMMY_HASH);
+    if (!user || !valid) throw new HttpError(401, MESSAGES.badLogin);
     if (user.status !== "active") throw new HttpError(403, MESSAGES[user.status]);
     loginLimiter.reset(key);
     return sendJson(res, 200, sessionPayload(user), startSession(req, user));
@@ -190,13 +215,13 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     if (user && user.status !== "blocked") {
       const { token, hash } = newToken();
       db.createResetToken(hash, user.id, RESET_TTL);
-      const link = `${baseUrl(req)}/${user.role === "manager" ? "admin" : ""}?reset=${token}`;
-      const sent = await sendMail({
+      const link = `${linkBase()}/${user.role === "manager" ? "admin" : ""}?reset=${token}`;
+      // Письмо отправляется без ожидания: иначе по времени ответа было бы видно, что такой email есть.
+      sendMail({
         to: user.email,
         subject: "Восстановление пароля STYX B2B",
         text: `Здравствуйте, ${user.name}!\n\nЧтобы задать новый пароль, откройте ссылку (действует 1 час):\n${link}\n\nЕсли вы не запрашивали смену пароля, просто проигнорируйте это письмо.`
-      });
-      if (!sent) console.warn(`Письмо для сброса пароля не отправлено (${user.email}): почта не настроена или недоступна.`);
+      }).then((sent) => { if (!sent) console.warn(`Письмо для сброса пароля не отправлено (${user.email}): почта не настроена или недоступна.`); });
     }
     return sendJson(res, 200, { ok: true, message: "Если такой email зарегистрирован, мы отправили на него ссылку для смены пароля." });
   }
@@ -207,7 +232,7 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     if (problem) throw new HttpError(400, problem);
     const userId = db.consumeResetToken(tokenHash(text(body.token, 200)));
     if (!userId) throw new HttpError(400, "Ссылка устарела или уже использована. Запросите новую.");
-    db.setPassword(userId, hashPassword(body.password));
+    db.setPassword(userId, await hashPasswordAsync(body.password));
     db.deleteUserSessions(userId); // выходим со всех устройств
     return sendJson(res, 200, { ok: true, message: "Пароль изменён. Войдите с новым паролем." });
   }
@@ -215,10 +240,10 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
   async function changePassword(req, res) {
     const user = requireUser(req);
     const body = await readJson(req);
-    if (!verifyPassword(String(body.current || ""), user.passwordHash)) throw new HttpError(400, "Текущий пароль указан неверно.");
+    if (!(await verifyPasswordAsync(String(body.current || ""), user.passwordHash))) throw new HttpError(400, "Текущий пароль указан неверно.");
     const problem = passwordProblem(body.password);
     if (problem) throw new HttpError(400, problem);
-    db.setPassword(user.id, hashPassword(body.password));
+    db.setPassword(user.id, await hashPasswordAsync(body.password));
     db.deleteUserSessions(user.id);
     return sendJson(res, 200, sessionPayload(user), startSession(req, user));
   }
@@ -239,12 +264,34 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
       if (other && other.id !== user.id) throw new HttpError(409, "Этот email уже занят другим кабинетом.");
       Object.assign(changes, { name, email, phone });
     }
+    let addedCompanies = [];
     if (body.account) {
       const profile = normalizeProfile(body.account);
       if (!profile.companies.length) throw new HttpError(400, "В кабинете должно остаться хотя бы одно юрлицо.");
+      // Реквизиты уже сохранённого юрлица из браузера не меняются: ИНН и КПП проверял менеджер.
+      const known = new Map(normalizeProfile(user.profile).companies.map((company) => [company.id, company]));
+      profile.companies.forEach((company) => {
+        const before = known.get(company.id);
+        if (before && (before.inn !== company.inn || before.kpp !== company.kpp)) throw new HttpError(400, "Реквизиты юрлица изменить нельзя. Удалите его и добавьте заново по ИНН.");
+      });
+      const knownInns = new Set([...known.values()].map((company) => company.inn));
+      addedCompanies = profile.companies.filter((company) => !known.has(company.id) && !knownInns.has(company.inn));
       changes.profile = profile;
     }
     const updated = db.updateUser(user.id, changes);
+    // Новое юрлицо в кабинете — сообщаем менеджеру, чтобы он видел, на кого клиент будет заказывать.
+    if (addedCompanies.length) {
+      notifyManagers({
+        subject: `Клиент добавил юрлицо: ${addedCompanies.map((company) => company.name).join(", ")}`,
+        text: [
+          `${updated.name} (${updated.email}) добавил в кабинет:`,
+          "",
+          ...addedCompanies.map((company) => `${company.name}, ИНН ${company.inn}${company.kpp ? `, КПП ${company.kpp}` : ""}${company.address ? `\n${company.address}` : ""}`),
+          "",
+          `Кабинет менеджера: ${linkBase()}/admin`
+        ].join("\n")
+      });
+    }
     return sendJson(res, 200, { ok: true, user: publicUser(updated) });
   }
 
@@ -261,21 +308,29 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     }, getCatalog());
     if (errors.length) throw new HttpError(400, errors.join(". "));
     const saved = db.createOrder({ userId: user.id, companyId: company.id, companyName: company.name, status: NEW_ORDER_STATUS, total: order.total, data: order });
-    const mailStatus = await mailOrder(saved);
+    // Заказ уже в базе: любая ошибка при письме не должна выглядеть для клиента как «не принят», иначе он оформит его повторно.
+    let mailStatus = "failed";
+    try {
+      mailStatus = await mailOrder(saved);
+    } catch (error) {
+      console.error(`Письмо по заказу ${saved.number} не отправлено:`, error);
+      db.setMailStatus(saved.id, "failed");
+    }
     return sendJson(res, 201, { order: toClientOrder(saved), mailStatus });
   }
 
   // Письмо менеджеру с бланками и подтверждение клиенту. Заказ уже в базе, поэтому ошибка почты его не теряет.
-  async function mailOrder(saved) {
+  // При повторной отправке менеджером клиенту второе подтверждение не уходит, а статус «ушло» не сбрасывается.
+  async function mailOrder(saved, { resend = false } = {}) {
     const order = { ...saved, date: formatDate(saved.createdAt) };
-    if (!getTransport() || !mail.to) {
-      db.setMailStatus(saved.id, "off");
+    if (!transport() || !mail.to) {
+      if (saved.mailStatus !== "sent") db.setMailStatus(saved.id, "off");
       return "off";
     }
     const blanks = await buildOrderBlanks(order);
     const sent = await sendMail({ to: mail.to, replyTo: order.contact.email || undefined, ...managerMessage(order, blanks) });
-    db.setMailStatus(saved.id, sent ? "sent" : "failed");
-    if (sent && mail.clientCopy !== false && order.contact.email) await sendMail({ to: order.contact.email, ...clientMessage(order) });
+    if (sent || saved.mailStatus !== "sent") db.setMailStatus(saved.id, sent ? "sent" : "failed");
+    if (sent && !resend && mail.clientCopy !== false && order.contact.email) await sendMail({ to: order.contact.email, ...clientMessage(order) });
     return sent ? "sent" : "failed";
   }
 
@@ -307,11 +362,12 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     const before = db.userById(id);
     if (!before || before.role !== "client") throw new HttpError(404, "Клиент не найден");
     const user = db.setStatus(id, body.status);
-    if (before.status === "pending" && user.status === "active") {
+    // Письмо «кабинет открыт» — при первом допуске, в том числе если заявку сначала отклонили, а потом приняли.
+    if (!before.approvedAt && before.status !== "active" && user.status === "active") {
       sendMail({
         to: user.email,
         subject: "Кабинет STYX B2B открыт",
-        text: `Здравствуйте, ${user.name}!\n\nМенеджер STYX подтвердил ваш кабинет. Войдите по своему email и паролю:\n${baseUrl(req)}/\n\nСпасибо, что работаете с нами.`
+        text: `Здравствуйте, ${user.name}!\n\nМенеджер STYX подтвердил ваш кабинет. Войдите по своему email и паролю:\n${linkBase()}/\n\nСпасибо, что работаете с нами.`
       });
     }
     return sendJson(res, 200, { ok: true, client: publicUser(user) });
@@ -369,7 +425,7 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
   async function adminResend(req, res, number) {
     requireUser(req, "manager");
     const order = findOrder(number);
-    const mailStatus = await mailOrder(order);
+    const mailStatus = await mailOrder(order, { resend: true });
     return sendJson(res, mailStatus === "sent" ? 200 : 502, { mailStatus, error: mailStatus === "sent" ? undefined : "Письмо не отправлено: проверьте настройки почты" });
   }
 
@@ -404,7 +460,7 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     if (host !== req.headers.host) throw new HttpError(403, "Запрос с чужого сайта");
   }
 
-  return async function handle(req, res, url) {
+  async function handle(req, res, url) {
     const route = routes.find(([method, pattern]) => method === req.method && pattern.test(url.pathname));
     if (!route) return false;
     try {
@@ -415,7 +471,14 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
       sendJson(res, error.status, { error: error.message });
     }
     return true;
-  };
+  }
+
+  // Для прокси поиска организаций в server.js: кто вошёл, адрес клиента и проверка источника запроса.
+  handle.currentUser = currentUser;
+  handle.clientIp = clientIp;
+  handle.checkOrigin = checkOrigin;
+  handle.HttpError = HttpError;
+  return handle;
 }
 
 module.exports = { createApi, ORDER_STATUSES, ENTITIES };

@@ -6,7 +6,8 @@
 .admin-auth-note { margin: 0; color: var(--muted); font-size: 13px; }
 .admin-auth-card .text-button { justify-self: start; }
 
-.admin-topbar { gap: 40px; }
+/* Логотип и содержимое страницы — по одной левой границе */
+.admin-topbar { gap: 40px; padding-left: max(16px, calc((100% - 1240px) / 2)); padding-right: max(16px, calc((100% - 1240px) / 2)); }
 .admin-nav { flex: 1; }
 .admin-user { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: 13px; font-weight: 600; }
 .admin-badge { display: inline-grid; place-items: center; min-width: 20px; height: 20px; margin-left: 6px; padding: 0 6px; border-radius: 999px; color: white; background: #c65c4e; font-size: 11px; letter-spacing: 0; }
@@ -19,7 +20,9 @@
 .admin-filter { min-width: 180px; }
 .admin-filter input, .admin-filter select { padding: 10px 12px; }
 
+.admin-count { min-height: 18px; margin: -10px 0 12px; color: var(--muted); font-size: 12px; }
 .admin-list { display: grid; gap: 12px; }
+.admin-item:focus { outline: 3px solid rgba(42,175,66,.35); outline-offset: 2px; }
 .admin-item { border: 1px solid var(--line); border-radius: 4px; background: white; }
 .admin-item-head { display: grid; grid-template-columns: 120px minmax(0, 1.6fr) 120px 150px 170px; align-items: center; gap: 16px; padding: 16px 18px; }
 .admin-item-title { display: grid; gap: 2px; min-width: 0; }

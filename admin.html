@@ -49,6 +49,7 @@
             <input id="admin-reset-password" type="password" autocomplete="new-password" minlength="8" required />
           </label>
           <button class="primary-button" type="submit">Сохранить пароль</button>
+          <button class="text-button" type="button" data-auth-mode="forgot">Запросить новую ссылку</button>
           <p class="form-message" id="admin-reset-message" role="alert"></p>
         </form>
       </div>
@@ -61,7 +62,7 @@
         </a>
         <nav class="main-nav admin-nav" aria-label="Разделы">
           <button type="button" class="nav-link is-active" data-tab="orders" aria-current="page">Заказы</button>
-          <button type="button" class="nav-link" data-tab="clients">Клиенты <span id="pending-badge" class="admin-badge" hidden></span></button>
+          <button type="button" class="nav-link" data-tab="clients">Клиенты<span id="pending-badge" hidden><span id="pending-badge-count" class="admin-badge" aria-hidden="true"></span><span id="pending-badge-label" class="visually-hidden"></span></span></button>
         </nav>
         <div class="admin-user">
           <span id="admin-user-name"></span>
@@ -75,7 +76,7 @@
             <h1 id="orders-title" tabindex="-1">Заказы</h1>
             <div class="admin-filters">
               <label class="field admin-filter">Поиск
-                <input id="orders-search" type="search" placeholder="Номер, клиент, ИНН" />
+                <input id="orders-search" type="search" placeholder="Номер или ИНН" />
               </label>
               <label class="field admin-filter">Статус
                 <select id="orders-status-filter"><option value="">Все</option></select>
@@ -83,7 +84,8 @@
               <button type="button" class="secondary-button compact" data-action="refresh">Обновить</button>
             </div>
           </div>
-          <div id="orders-list" class="admin-list" aria-live="polite"></div>
+          <p id="orders-count" class="admin-count" role="status"></p>
+          <div id="orders-list" class="admin-list"></div>
         </section>
 
         <section id="clients-tab" class="is-hidden" aria-labelledby="clients-title">
@@ -96,7 +98,7 @@
               <button type="button" class="chip" data-client-filter="blocked" aria-pressed="false">Заблокированные</button>
             </div>
           </div>
-          <div id="clients-list" class="admin-list" aria-live="polite"></div>
+          <div id="clients-list" class="admin-list"></div>
         </section>
       </main>
     </section>

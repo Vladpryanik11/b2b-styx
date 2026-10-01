@@ -10,7 +10,7 @@ Type=simple
 User=styx
 WorkingDirectory=/opt/styx-b2b
 EnvironmentFile=/opt/styx-b2b/.env
-Environment=NODE_ENV=production TRUST_PROXY=1 COOKIE_SECURE=1
+Environment=NODE_ENV=production TRUST_PROXY=1 COOKIE_SECURE=1 HOST=127.0.0.1
 ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning server.js
 Restart=always
 RestartSec=5

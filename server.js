@@ -14,7 +14,7 @@ const { createTransport } = require("./server/mail");
 const { loadCatalog } = require("./server/orders");
 const { openDb } = require("./server/db");
 const { createApi } = require("./server/api");
-const { hashPassword, passwordProblem } = require("./server/auth");
+const { hashPassword, passwordProblem, createRateLimiter } = require("./server/auth");
 
 function configFromEnv(env = process.env) {
   return {
@@ -26,7 +26,8 @@ function configFromEnv(env = process.env) {
     cleanUrl: env.DADATA_CLEAN_URL || "https://cleaner.dadata.ru/api/v1/clean/address",
     dbPath: env.DB_PATH || path.join(__dirname, "data", "styx.sqlite"),
     backupDir: env.BACKUP_DIR || path.join(__dirname, "data", "backups"),
-    backupKeep: Number(env.BACKUP_KEEP) || 14,
+    backupKeep: env.BACKUP_KEEP !== undefined && env.BACKUP_KEEP !== "" && Number.isFinite(Number(env.BACKUP_KEEP)) ? Math.max(1, Number(env.BACKUP_KEEP)) : 14,
+    host: env.HOST || undefined,
     appUrl: env.APP_URL || "",
     requireApproval: env.REQUIRE_APPROVAL !== "0",
     trustProxy: env.TRUST_PROXY === "1",
@@ -121,14 +122,18 @@ async function handleAddressSuggest(cfg, url, res) {
   }
 }
 
+// Читает небольшое тело запроса. Лишние байты сверх лимита не копятся в памяти, а большой запрос прерывается.
 function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
-    let body = "";
+    const chunks = [];
+    let size = 0;
     req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > limit) reject(new Error("Body too large"));
+      size += chunk.length;
+      if (size <= limit) return chunks.push(chunk);
+      reject(new Error("Body too large"));
+      req.destroy();
     });
-    req.on("end", () => resolve(body));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
@@ -184,16 +189,33 @@ function createServer(cfg = configFromEnv(), deps = {}) {
   const api = createApi({
     cfg,
     db,
-    getTransport: () => (deps.transport === undefined ? (deps.transport = createTransport(cfg.mail || {})) : deps.transport),
+    getTransport: deps.getTransport || (() => (deps.transport === undefined ? (deps.transport = createTransport(cfg.mail || {})) : deps.transport)),
     getCatalog: () => deps.catalog || (deps.catalog = loadCatalog())
   });
+  // Поиск организаций и адресов — не больше 120 запросов в минуту с одного адреса,
+  // платная проверка адреса — только для вошедшего клиента и не больше 30 в час.
+  const lookupLimiter = createRateLimiter({ limit: 120, windowMs: 60 * 1000 });
+  const cleanLimiter = createRateLimiter({ limit: 30, windowMs: 60 * 60 * 1000 });
   const server = http.createServer(async (req, res) => {
     Object.entries(SECURITY_HEADERS).forEach(([name, value]) => res.setHeader(name, value));
     try {
       const url = new URL(req.url, "http://localhost");
-      if (req.method === "GET" && url.pathname === "/api/dadata/party") return await handleParty(cfg, url, res);
-      if (req.method === "GET" && url.pathname === "/api/dadata/address") return await handleAddressSuggest(cfg, url, res);
-      if (req.method === "POST" && url.pathname === "/api/dadata/clean-address") return await handleAddressClean(cfg, req, res);
+      if (url.pathname.startsWith("/api/dadata/")) {
+        if (!lookupLimiter.hit(api.clientIp(req))) return sendJson(res, 429, { error: "Too many requests" });
+        if (req.method === "GET" && url.pathname === "/api/dadata/party") return await handleParty(cfg, url, res);
+        if (req.method === "GET" && url.pathname === "/api/dadata/address") return await handleAddressSuggest(cfg, url, res);
+        if (req.method === "POST" && url.pathname === "/api/dadata/clean-address") {
+          try {
+            api.checkOrigin(req);
+          } catch (error) {
+            return sendJson(res, error.status || 403, { error: error.message });
+          }
+          const user = api.currentUser(req);
+          if (!user || user.status !== "active") return sendJson(res, 401, { error: "Войдите в кабинет" });
+          if (!cleanLimiter.hit(String(user.id))) return sendJson(res, 429, { error: "Too many requests" });
+          return await handleAddressClean(cfg, req, res);
+        }
+      }
       if (await api(req, res, url)) return;
       if (url.pathname.startsWith("/api/")) return sendJson(res, 404, { error: "Not found" });
       if (req.method === "GET") return await handleStatic(url, res);
@@ -257,8 +279,9 @@ if (require.main === module) {
     process.exit(0);
   }
   const deps = {};
-  createServer(cfg, deps).listen(cfg.port, () => {
-    console.log(`STYX B2B: http://localhost:${cfg.port}  (база: ${cfg.dbPath})`);
+  createServer(cfg, deps).listen(cfg.port, cfg.host, () => {
+    console.log(`STYX B2B: http://${cfg.host || "localhost"}:${cfg.port}  (база: ${cfg.dbPath})`);
+    if (!cfg.appUrl) console.warn("APP_URL не задан: ссылки в письмах (сброс пароля, вход) будут вести на localhost. На сервере укажите адрес кабинета, например https://b2b.styx-naturcosmetic.ru.");
     if (!cfg.token) console.warn("DADATA_TOKEN не задан: поиск организаций будет работать на тестовых данных.");
     if (!cfg.secret) console.warn("DADATA_SECRET не задан: проверка (стандартизация) адреса будет недоступна.");
     if (!cfg.mail.to || (!cfg.mail.smtpUrl && !cfg.mail.host && !cfg.mail.outboxDir)) {

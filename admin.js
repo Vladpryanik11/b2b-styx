@@ -39,7 +39,13 @@ async function api(method, path, body) {
     return { ok: false, status: 0, data: { error: "Сервер недоступен. Проверьте соединение." } };
   }
   const data = await response.json().catch(() => ({}));
-  if (response.status === 401 && path !== "/api/auth/login") showAuth("login");
+  if (response.status === 401 && !path.startsWith("/api/auth/")) {
+    // Сессия закончилась посреди работы: возвращаемся ко входу и объясняем почему.
+    if (state.user) {
+      showAuth("login");
+      setMessage("#admin-login-message", "Сессия закончилась. Войдите снова.");
+    }
+  }
   return { ok: response.ok, status: response.status, data };
 }
 
@@ -47,6 +53,8 @@ async function api(method, path, body) {
 
 function showAuth(mode) {
   state.user = null;
+  if (mode !== "reset" && new URLSearchParams(window.location.search).has("reset")) history.replaceState(null, "", "/admin");
+  ["login", "forgot", "reset"].forEach((name) => setMessage(`#admin-${name}-message`, ""));
   $("#admin-app").classList.add("is-hidden");
   $("#admin-auth").classList.remove("is-hidden");
   ["login", "forgot", "reset"].forEach((name) => $(`#admin-${name}-form`).classList.toggle("is-hidden", name !== mode));
@@ -60,6 +68,7 @@ async function showApp(user) {
   $("#admin-app").classList.remove("is-hidden");
   $("#admin-user-name").textContent = user.name;
   await refresh();
+  $(`#${state.tab}-title`).focus();
 }
 
 async function handleLogin(event) {
@@ -81,16 +90,20 @@ async function handleLogin(event) {
 
 async function handleForgot(event) {
   event.preventDefault();
+  const button = $("#admin-forgot-form [type=submit]");
+  if (button.disabled) return;
+  button.disabled = true;
   const { ok, data } = await api("POST", "/api/auth/forgot", { email: $("#admin-forgot-email").value.trim() });
+  button.disabled = false;
   setMessage("#admin-forgot-message", data.message || data.error || "Не удалось отправить ссылку.", ok);
 }
 
 async function handleReset(event) {
   event.preventDefault();
+  if ($("#admin-reset-password").value.length < 8) return setMessage("#admin-reset-message", "Пароль должен быть не короче 8 символов.");
   const token = new URLSearchParams(window.location.search).get("reset");
   const { ok, data } = await api("POST", "/api/auth/reset", { token, password: $("#admin-reset-password").value });
   if (!ok) return setMessage("#admin-reset-message", data.error || "Не удалось сменить пароль.");
-  history.replaceState(null, "", "/admin");
   showAuth("login");
   setMessage("#admin-login-message", data.message, true);
 }
@@ -119,8 +132,8 @@ async function refresh() {
 function render() {
   const pending = state.clients.filter((client) => client.status === "pending").length;
   $("#pending-badge").hidden = !pending;
-  $("#pending-badge").textContent = pending;
-  $("#pending-badge").setAttribute("aria-label", `ждут подтверждения: ${pending}`);
+  $("#pending-badge-count").textContent = pending;
+  $("#pending-badge-label").textContent = `, ждут подтверждения: ${pending}`;
   renderOrders();
   renderClients();
 }
@@ -181,6 +194,14 @@ function renderOrders() {
   const orders = state.orders.filter(orderMatches);
   $("#orders-list").innerHTML = orders.map(orderItem).join("")
     || `<div class="empty-state">${state.orders.length ? "Нет заказов по этому фильтру." : "Заказов пока нет."}</div>`;
+  $("#orders-count").textContent = state.orders.length ? `Показано заказов: ${orders.length} из ${state.orders.length}` : "";
+}
+
+// После перерисовки списка фокус возвращается на тот же элемент, чтобы не терять место при работе с клавиатуры.
+function refocus(selector) {
+  const element = $(selector);
+  element?.focus();
+  return Boolean(element);
 }
 
 async function changeOrderStatus(select) {
@@ -195,6 +216,15 @@ async function changeOrderStatus(select) {
   }
   Object.assign(order, data.order);
   showToast(`${number}: статус «${order.status}». Клиент увидит его в кабинете.`);
+  // Сумма клиента не учитывает отменённые заказы — обновляем карточки клиентов.
+  const clients = await api("GET", "/api/admin/clients");
+  if (clients.ok) { state.clients = clients.data.clients; renderClients(); }
+  if (state.statusFilter) {
+    const opened = select.closest("details")?.open;
+    renderOrders();
+    if (opened) $(`[data-order="${CSS.escape(number)}"] details`)?.setAttribute("open", "");
+    refocus(`[data-status-for="${CSS.escape(number)}"]`) || $("#orders-status-filter").focus();
+  }
 }
 
 async function resendOrder(button) {
@@ -207,6 +237,7 @@ async function resendOrder(button) {
   const opened = button.closest("details")?.open;
   renderOrders();
   if (opened) $(`[data-order="${CSS.escape(number)}"] details`).open = true;
+  refocus(`[data-resend="${CSS.escape(number)}"]`);
   showToast(ok ? `Письмо по заказу ${number} отправлено` : data.error || "Письмо не отправлено.");
 }
 
@@ -220,7 +251,7 @@ function clientItem(client) {
     active: `<button type="button" class="secondary-button compact danger-button" data-client="${client.id}" data-set-status="blocked">Заблокировать</button>`,
     blocked: `<button type="button" class="secondary-button compact" data-client="${client.id}" data-set-status="active">Разблокировать</button>`
   }[client.status] || "";
-  return `<article class="admin-item">
+  return `<article class="admin-item" data-client-card="${client.id}" tabindex="-1" aria-label="${escapeHtml(client.name)}">
     <div class="admin-item-head client-head">
       <span class="admin-item-title"><strong>${escapeHtml(client.name)}</strong><span>${escapeHtml([client.email, client.phone].filter(Boolean).join(" · "))}</span><span>Регистрация: ${escapeHtml(formatDateTime(client.createdAt))} · Вход: ${escapeHtml(formatDateTime(client.lastLoginAt))}</span></span>
       <span class="client-companies">${companies || "—"}</span>
@@ -247,15 +278,23 @@ function renderClients() {
 async function setClientStatus(button) {
   const client = state.clients.find((item) => item.id === Number(button.dataset.client));
   const status = button.dataset.setStatus;
-  if (status === "blocked" && !window.confirm(`Закрыть доступ к кабинету для ${client.name}? Клиент сразу выйдет из кабинета.`)) return;
+  const wasPending = client.status === "pending";
+  const question = wasPending
+    ? `Отклонить заявку ${client.name} (${client.email})? Войти в кабинет будет нельзя.`
+    : `Закрыть доступ к кабинету для ${client.name}? Клиент сразу выйдет из кабинета.`;
+  if (status === "blocked" && !window.confirm(question)) return;
   button.disabled = true;
   const { ok, data } = await api("POST", `/api/admin/clients/${client.id}/status`, { status });
   button.disabled = false;
   if (!ok) return showToast(data.error || "Не удалось изменить доступ.");
-  const wasPending = client.status === "pending";
+  const firstApproval = !client.approvedAt && status === "active";
   client.status = data.client.status;
+  if (firstApproval) client.approvedAt = new Date().toISOString();
   render();
-  showToast(status === "active" ? (wasPending ? `Кабинет открыт, ${client.email} получит письмо` : "Доступ восстановлен") : "Доступ закрыт");
+  refocus(`[data-client-card="${client.id}"] [data-set-status]`) || refocus(`[data-client-card="${client.id}"]`);
+  showToast(status === "active"
+    ? (firstApproval ? `Кабинет открыт, ${client.email} получит письмо` : "Доступ восстановлен")
+    : (wasPending ? "Заявка отклонена" : "Доступ закрыт"));
 }
 
 // ---------- Навигация ----------

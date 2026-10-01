@@ -19,7 +19,8 @@ async function withApp(run, cfg = {}) {
   const db = openDb(":memory:");
   db.createUser({ email: "manager@styx.test", name: "Мария", passwordHash: hashPassword("manager-pass"), role: "manager", status: "active" });
   const transport = { async sendMail(message) { sent.push(message); return { messageId: "test" }; } };
-  const app = createServer({ token: "", secret: "", mail: MAIL, requireApproval: true, ...cfg }, { db, transport });
+  const { brokenTransport, ...rest } = cfg;
+  const app = createServer({ token: "", secret: "", mail: MAIL, requireApproval: true, ...rest }, { db, transport, getTransport: brokenTransport?.getTransport });
   const base = await listen(app);
   try { await run(client(base), { sent, db, base }); } finally { app.close(); }
 }
@@ -228,7 +229,8 @@ test("кабинет менеджера: клиенты, статусы зака
 
     const before = sent.length;
     assert.equal((await manager.call("POST", "/api/admin/orders/STYX-00001/resend", {})).status, 200);
-    assert.ok(sent.length > before);
+    assert.equal(sent.length, before + 1, "повторно уходит только письмо менеджеру, клиенту второе подтверждение не шлём");
+    assert.equal(sent.at(-1).to, MAIL.to);
 
     const clients = await manager.call("GET", "/api/admin/clients");
     assert.equal(clients.body.clients[0].ordersCount, 1);
@@ -265,4 +267,76 @@ test("страницы кабинета менеджера и политики �
     assert.equal(res.headers.get("x-frame-options"), "DENY");
     assert.equal((await fetch(`${base}/data/styx.sqlite`)).status, 404);
   });
+});
+
+test("ссылка сброса пароля строится от APP_URL, а не от присланного заголовка Host", async () => {
+  await withApp(async (browser, { sent, base }) => {
+    await registerAndApprove(browser);
+    const { port } = new URL(base);
+    // fetch не даёт подменить Host, поэтому запрос отправляем напрямую через http.
+    await new Promise((resolve, reject) => {
+      const req = require("node:http").request({ host: "127.0.0.1", port, method: "POST", path: "/api/auth/forgot", headers: { Host: "evil.example", "Content-Type": "application/json" } }, (res) => { res.resume(); res.on("end", resolve); });
+      req.on("error", reject);
+      req.end(JSON.stringify({ email: REGISTER.email }));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const letter = sent.find((mail) => /Восстановление пароля/.test(mail.subject));
+    assert.match(letter.text, /https:\/\/b2b\.styx\.test\/\?reset=/);
+    assert.doesNotMatch(letter.text, /evil\.example/);
+  }, { appUrl: "https://b2b.styx.test" });
+});
+
+test("необычные запросы не роняют сервер: тело null, битая чужая cookie, текст, разрезанный посреди буквы", async () => {
+  await withApp(async (browser, { base }) => {
+    for (const path of ["/api/auth/login", "/api/auth/register", "/api/auth/forgot"]) {
+      const res = await fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "null" });
+      assert.equal(res.status, 400, path);
+    }
+    assert.equal((await fetch(`${base}/api/session`, { headers: { Cookie: "ym_uid=%E0%A4%A; other=1" } })).status, 200);
+
+    await registerAndApprove(browser);
+    const { port } = new URL(base);
+    const cookie = browser.cookie;
+    const body = Buffer.from(JSON.stringify({ user: { name: "Анна Петрова", email: REGISTER.email, phone: "" } }));
+    const cut = body.indexOf(Buffer.from("А")) + 1; // режем внутри двухбайтовой буквы
+    await new Promise((resolve, reject) => {
+      const req = require("node:http").request({ host: "127.0.0.1", port, method: "PUT", path: "/api/account", headers: { Cookie: cookie, "Content-Type": "application/json", "Content-Length": body.length } }, (res) => { res.resume(); res.on("end", resolve); });
+      req.on("error", reject);
+      req.write(body.subarray(0, cut));
+      setTimeout(() => req.end(body.subarray(cut)), 20);
+    });
+    assert.equal((await browser.call("GET", "/api/session")).body.user.name, "Анна Петрова");
+  });
+});
+
+test("неверные настройки почты не роняют сервер: регистрация и заказ проходят, письмо помечено как неотправленное", async () => {
+  const broken = { getTransport() { throw new Error("bad SMTP_URL"); } };
+  await withApp(async (browser) => {
+    const { session } = await registerAndApprove(browser);
+    const order = await browser.call("POST", "/api/orders", { companyId: COMPANY.id, delivery: "Самовывоз", items: [{ sku: "15000", qty: 1 }] });
+    assert.equal(order.status, 201);
+    assert.equal(order.body.mailStatus, "off");
+    assert.ok(session);
+  }, { brokenTransport: broken });
+});
+
+test("юрлицо: реквизиты сохранённого изменить нельзя, о новом юрлице узнаёт менеджер", async () => {
+  await withApp(async (browser, { sent }) => {
+    await registerAndApprove(browser);
+    const changed = await browser.call("PUT", "/api/account", { account: { companies: [{ ...COMPANY, inn: "7702345678" }], activeCompanyId: COMPANY.id } });
+    assert.equal(changed.status, 400);
+    const second = { id: "company-7705123456", name: "ИП Смирнова", inn: "7705123456", kpp: "", deliveryAddresses: [] };
+    const before = sent.length;
+    assert.equal((await browser.call("PUT", "/api/account", { account: { companies: [COMPANY, second], activeCompanyId: COMPANY.id } })).status, 200);
+    const note = sent.slice(before).find((mail) => /добавил юрлицо/.test(mail.subject));
+    assert.ok(note, "менеджеру ушло письмо о новом юрлице");
+    assert.match(note.text, /ИНН 7705123456/);
+  });
+});
+
+test("знак $ в названии организации не портит бланк", async () => {
+  const { buildBlank } = require("../server/blanks");
+  const { buffer } = await buildBlank("styx-aromaderm.xlsx", { counterparty: "ООО $' Тест $&", lines: [{ sku: "15000", qty: 1 }] });
+  const sheet = await (await JSZip.loadAsync(buffer)).file("xl/worksheets/sheet1.xml").async("string");
+  assert.match(sheet, /ООО \$' Тест \$&amp;/);
 });

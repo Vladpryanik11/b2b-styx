@@ -85,7 +85,8 @@ function setCell(sheet, ref, valueXml, type) {
   const cell = sheet.match(pattern)?.[0];
   if (!cell) throw new Error(`Нет ячейки ${ref} в бланке`);
   const style = cell.match(/ s="(\d+)"/)?.[1];
-  return sheet.replace(pattern, `<c r="${ref}"${style ? ` s="${style}"` : ""}${type ? ` t="${type}"` : ""}>${valueXml}</c>`);
+  const xml = `<c r="${ref}"${style ? ` s="${style}"` : ""}${type ? ` t="${type}"` : ""}>${valueXml}</c>`;
+  return sheet.replace(pattern, () => xml); // функция, чтобы «$» в тексте не читался как шаблон замены
 }
 
 /**
@@ -106,7 +107,7 @@ async function buildBlank(file, data) {
     total += item.price * line.qty;
   });
   if (data.counterparty) { // название организации, «Контрагент» уже есть в бланке
-    const filled = template.counterpartyXml.replace(/_{3,}/, xmlEscape(data.counterparty));
+    const filled = template.counterpartyXml.replace(/_{3,}/, () => xmlEscape(data.counterparty));
     sheet = setCell(sheet, template.counterpartyRef, `<is>${filled}</is>`, "inlineStr");
   }
   // Формулу не трогаем, обновляем только её сохранённый результат — он виден и до пересчёта.

@@ -51,8 +51,8 @@ button { cursor: pointer; }
 .auth-tabs { display: flex; gap: 6px; margin-bottom: 28px; padding: 4px; border-radius: 4px; background: #f1f5f1; }
 .auth-tab { flex: 1; border: 0; padding: 11px 12px; border-radius: 4px; color: var(--muted); background: transparent; font-size: 14px; font-weight: 600; }
 .auth-tab.is-active { color: var(--green-dark); background: white; box-shadow: 0 4px 12px rgba(34, 58, 41, .08); }
-.auth-form { display: grid; gap: 16px; }
-.field { display: grid; gap: 7px; color: #53605a; font-size: 13px; font-weight: 600; }
+.auth-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; color: #53605a; font-size: 13px; font-weight: 600; }
 .field input, .field select, .field textarea { width: 100%; border: 1px solid #dce4de; border-radius: 4px; padding: 13px 14px; outline: 0; color: var(--ink); background: #fff; transition: border .18s, box-shadow .18s; }
 input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid rgba(42,175,66,.35); outline-offset: 3px; }
 .field textarea { resize: vertical; min-height: 96px; }

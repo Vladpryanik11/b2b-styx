@@ -4,14 +4,18 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const nodemailer = require("nodemailer");
 
+// Короткие таймауты: если почтовый сервер не отвечает, клиент не ждёт минутами, а заказ остаётся в базе с пометкой «не ушло».
+const TIMEOUTS = { connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 20000 };
+
 function createTransport(mail) {
-  if (mail.smtpUrl) return nodemailer.createTransport(mail.smtpUrl);
+  if (mail.smtpUrl) return nodemailer.createTransport({ url: mail.smtpUrl, ...TIMEOUTS });
   if (mail.host) {
     return nodemailer.createTransport({
       host: mail.host,
       port: mail.port,
       secure: mail.secure,
-      auth: mail.user ? { user: mail.user, pass: mail.pass } : undefined
+      auth: mail.user ? { user: mail.user, pass: mail.pass } : undefined,
+      ...TIMEOUTS
     });
   }
   if (mail.outboxDir) {
