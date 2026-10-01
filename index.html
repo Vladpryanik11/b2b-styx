@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Личный кабинет клиента STYX B2B" />
+    <title>STYX B2B — личный кабинет</title>
+    <link rel="preload" href="fonts/montserrat-cyrillic.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <section id="auth-screen" class="auth-screen">
+      <div class="auth-aside">
+        <div class="brand brand-light">
+          <img class="brand-logo" src="styx-logo.png" alt="STYX Naturcosmetic" width="598" height="227" />
+        </div>
+        <div class="aside-copy">
+          <p class="eyebrow">STYX B2B</p>
+          <h1>Заказы и документы<br />в одном кабинете</h1>
+          <p>Сохраните реквизиты один раз — дальше они будут подставляться в заказы автоматически.</p>
+        </div>
+        <div class="aside-note">
+          <span class="note-icon">✓</span>
+          <span>Реквизиты компании заполнятся автоматически по ИНН</span>
+        </div>
+      </div>
+
+      <div class="auth-content">
+        <div class="mobile-brand brand">
+          <img class="brand-logo" src="styx-logo.png" alt="STYX Naturcosmetic" width="598" height="227" />
+        </div>
+
+        <div class="auth-card">
+          <div class="auth-heading">
+            <p class="eyebrow">Личный кабинет</p>
+            <h2 id="auth-title">Вход в кабинет</h2>
+            <p id="auth-subtitle">Используйте email и пароль, чтобы продолжить.</p>
+          </div>
+
+          <div class="auth-tabs" role="tablist" aria-label="Авторизация">
+            <button id="login-tab" class="auth-tab is-active" data-auth-tab="login" role="tab" aria-selected="true" aria-controls="login-form" type="button">Войти</button>
+            <button id="register-tab" class="auth-tab" data-auth-tab="register" role="tab" aria-selected="false" aria-controls="register-form" type="button">Регистрация</button>
+          </div>
+
+          <form id="login-form" class="auth-form" role="tabpanel" aria-labelledby="login-tab" aria-hidden="false">
+            <label class="field">
+              <span>Email</span>
+              <input id="login-email" type="email" autocomplete="email" placeholder="name@company.ru" required />
+            </label>
+            <label class="field">
+              <span>Пароль</span>
+              <div class="password-field">
+                <input id="login-password" type="password" autocomplete="current-password" placeholder="Введите пароль" required />
+                <button class="password-toggle" type="button" data-password-toggle="#login-password" aria-label="Показать пароль">Показать</button>
+              </div>
+            </label>
+            <div class="form-row form-row-end">
+              <button class="text-button" type="button" data-action="forgot-password">Забыли пароль?</button>
+            </div>
+            <button class="primary-button" type="submit">Войти в кабинет <span>→</span></button>
+            <p class="form-message" id="login-message"></p>
+          </form>
+
+          <form id="register-form" class="auth-form is-hidden" role="tabpanel" aria-labelledby="register-tab" aria-hidden="true">
+            <label class="field">
+              <span>Ваше имя</span>
+              <input id="register-name" type="text" autocomplete="name" placeholder="Например, Анна Петрова" required />
+            </label>
+
+            <div class="field company-field">
+              <label for="company-query">ИНН или название организации</label>
+              <div class="search-field">
+                <input id="company-query" type="text" autocomplete="off" placeholder="Введите ИНН или название" aria-controls="company-suggestions" aria-expanded="false" aria-autocomplete="list" required />
+                <span class="search-spinner" id="company-spinner" role="status" aria-label="Ищем организацию"></span>
+              </div>
+              <div id="company-suggestions" class="suggestions" role="listbox" aria-label="Организации" aria-busy="false" hidden></div>
+              <div id="company-selected" class="company-selected" hidden></div>
+              <p class="field-hint">Начните вводить ИНН — реквизиты подставятся автоматически.</p>
+            </div>
+
+            <label class="field">
+              <span>Email</span>
+              <input id="register-email" type="email" autocomplete="email" placeholder="name@company.ru" required />
+            </label>
+            <div class="form-grid">
+              <label class="field">
+                <span>Пароль</span>
+                <div class="password-field">
+                  <input id="register-password" type="password" autocomplete="new-password" placeholder="Минимум 6 символов" minlength="6" required />
+                  <button class="password-toggle" type="button" data-password-toggle="#register-password" aria-label="Показать пароль">Показать</button>
+                </div>
+              </label>
+              <label class="field">
+                <span>Повторите пароль</span>
+                <input id="register-password-confirm" type="password" autocomplete="new-password" placeholder="Повторите пароль" minlength="6" required />
+              </label>
+            </div>
+            <label class="checkbox-field">
+              <input id="register-consent" type="checkbox" required />
+              <span>Соглашаюсь с обработкой данных для оформления заказов</span>
+            </label>
+            <button class="primary-button" type="submit">Создать кабинет <span>→</span></button>
+            <p class="form-message" id="register-message"></p>
+          </form>
+
+          <p class="auth-footnote">Регистрация нужна, чтобы не вводить реквизиты заново при каждом заказе.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="app-screen" class="app-screen is-hidden">
+      <div class="site-strip">
+        <span>Оптовый кабинет STYX Naturcosmetic</span>
+        <a href="https://styx-naturcosmetic.ru/" target="_blank" rel="noopener">styx-naturcosmetic.ru</a>
+      </div>
+      <header class="topbar">
+        <a class="brand brand-link" href="#dashboard" data-nav="dashboard" aria-label="STYX B2B">
+          <img class="brand-logo" src="styx-logo.png" alt="STYX Naturcosmetic" width="598" height="227" />
+        </a>
+        <nav class="main-nav" aria-label="Основное меню">
+          <button type="button" class="nav-link is-active" data-nav="dashboard">Обзор</button>
+          <button type="button" class="nav-link" data-nav="orders">Мои заказы</button>
+          <button type="button" class="nav-link" data-nav="profile">Профиль</button>
+        </nav>
+        <div class="user-menu">
+          <label class="company-switch">
+            <span class="visually-hidden">Юрлицо</span>
+            <select id="company-switch"></select>
+          </label>
+          <div class="user-avatar" id="user-avatar">АП</div>
+          <div class="user-meta">
+            <strong id="user-name">Анна Петрова</strong>
+            <span id="user-email-short">name@company.ru</span>
+          </div>
+          <button class="icon-button" data-action="logout" aria-label="Выйти" title="Выйти из кабинета"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h5v16h-5M10 8l-4 4 4 4M6 12h10"/></svg></button>
+        </div>
+      </header>
+
+      <main class="app-main">
+        <section id="dashboard-view" class="app-view">
+          <div class="page-heading page-heading-dashboard">
+            <div>
+              <p class="eyebrow">Главная / Личный кабинет</p>
+              <h1>Добрый день, <span id="dashboard-name">Анна</span>!</h1>
+            </div>
+            <button class="primary-button compact" data-action="new-order"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Новый заказ</button>
+          </div>
+
+          <div class="kpi-row">
+            <div class="kpi"><strong id="orders-count">0</strong><span>заказов всего</span></div>
+            <div class="kpi"><strong id="orders-active">0</strong><span>в работе</span></div>
+            <div class="kpi"><strong id="orders-completed">0</strong><span>завершено</span></div>
+            <div class="kpi"><strong id="orders-sum">0 ₽</strong><span>сумма всех заказов</span></div>
+          </div>
+
+          <div class="dashboard-grid">
+            <article class="orders-card card">
+              <div class="card-heading-row">
+                <h2>Последние заказы</h2>
+                <button class="text-button" data-nav="orders">Все заказы →</button>
+              </div>
+              <div id="dashboard-orders" class="orders-list"></div>
+            </article>
+
+            <article class="company-card card">
+              <div class="card-heading-row"><h2 id="company-card-title">Организация</h2></div>
+              <div id="company-overview" class="company-overview" hidden></div>
+              <dl class="company-details" id="company-details">
+                <div><dt>Название</dt><dd id="company-name">ООО «Компания»</dd></div>
+                <div><dt>ИНН / КПП</dt><dd id="company-inn">—</dd></div>
+                <div><dt>Юридический адрес</dt><dd id="company-address">—</dd></div>
+                <div><dt>Адрес доставки по умолчанию</dt><dd id="company-delivery">—</dd></div>
+                <div><dt>Email</dt><dd id="company-email">—</dd></div>
+              </dl>
+              <button class="secondary-button" data-nav="profile">Изменить данные</button>
+            </article>
+          </div>
+        </section>
+
+        <section id="orders-view" class="app-view is-hidden">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Главная / Мои заказы</p>
+              <h1 tabindex="-1">Мои заказы</h1>
+              <p id="orders-subtitle">Все заказы вашей организации в одном месте.</p>
+            </div>
+            <button class="primary-button compact" data-action="new-order"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Новый заказ</button>
+          </div>
+          <article class="orders-card card">
+            <div id="all-orders" class="orders-list orders-list-full"></div>
+          </article>
+        </section>
+
+        <section id="profile-view" class="app-view is-hidden">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Главная / Профиль</p>
+              <h1>Профиль</h1>
+              <p>Данные, которые будут использоваться в ваших заказах.</p>
+            </div>
+          </div>
+          <div class="profile-grid">
+            <article class="card profile-card">
+              <div class="card-label">Контактное лицо</div>
+              <div class="profile-avatar" id="profile-avatar">АП</div>
+              <h2 id="profile-name">Анна Петрова</h2>
+              <p id="profile-email">name@company.ru</p>
+              <p id="profile-phone" class="profile-phone" hidden></p>
+              <button class="secondary-button" data-action="edit-profile">Редактировать данные</button>
+              <button class="text-button logout-link" type="button" data-action="logout">Выйти из кабинета</button>
+            </article>
+            <article class="card profile-company-card">
+              <div class="card-heading-row">
+                <div class="card-label">Юрлица</div>
+                <button class="secondary-button compact" type="button" data-action="add-company">Добавить юрлицо</button>
+              </div>
+              <div id="companies-list" class="companies-list"></div>
+              <p class="profile-note">Реквизиты заполнены автоматически по ИНН. Чтобы изменить их, напишите менеджеру STYX.</p>
+            </article>
+          </div>
+          <article class="card addresses-card">
+            <div class="card-heading-row">
+              <h2 id="addresses-title">Адреса доставки</h2>
+              <button class="secondary-button compact" type="button" data-action="add-address" id="add-address-button">Добавить адрес</button>
+            </div>
+            <div id="addresses-list" class="addresses-list"></div>
+          </article>
+        </section>
+      </main>
+      <nav class="mobile-nav" aria-label="Мобильное меню">
+        <button type="button" class="nav-link is-active" data-nav="dashboard"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-7 8 7v9H4z"/></svg>Обзор</button>
+        <button type="button" class="nav-link" data-nav="orders"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6zM9 8h6M9 12h6M9 16h4"/></svg>Заказы</button>
+        <button type="button" class="nav-link" data-nav="profile"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>Профиль</button>
+      </nav>
+    </section>
+
+    <div id="order-modal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="order-modal-title" aria-describedby="order-modal-description" tabindex="-1">
+      <div class="modal-card modal-card-wide">
+        <button class="modal-close" type="button" data-action="close-modal" aria-label="Закрыть">×</button>
+        <p class="eyebrow">Новый заказ</p>
+        <h2 id="order-modal-title">Оформить заказ</h2>
+        <p id="order-modal-description" class="modal-subtitle">Реквизиты вашей организации уже подставлены. В демо-режиме заказ сохраняется только в этом браузере.</p>
+        <form id="order-form" class="order-form" novalidate>
+          <section class="order-section">
+            <h3>Контрагент</h3>
+            <label class="field" id="order-company-field" hidden>
+              <span>Юрлицо *</span>
+              <select id="order-company-select"></select>
+            </label>
+            <div class="order-company" id="order-company"></div>
+            <div class="delivery-row">
+              <label class="field">
+                <span>Способ получения *</span>
+                <select id="order-delivery" required>
+                  <option value="">Выберите вариант</option>
+                  <option>Доставка</option>
+                  <option>Самовывоз</option>
+                </select>
+              </label>
+            </div>
+            <div class="pickup-info" id="order-pickup-info" hidden>
+              <strong>Пункт самовывоза</strong>
+              <span>г. Москва, ул. Сущевская, д. 23</span>
+            </div>
+            <div class="order-address" id="order-address-field" hidden>
+              <label class="field" id="order-saved-address-wrap">
+                <span>Адрес доставки *</span>
+                <select id="order-saved-address"></select>
+              </label>
+              <div class="field address-field" id="order-new-address">
+                <label for="order-address" id="order-address-label">Адрес доставки *</label>
+                <div class="address-row">
+                  <div class="search-field">
+                    <input id="order-address" type="text" autocomplete="off" placeholder="Город, улица, дом" role="combobox" aria-controls="address-suggestions" aria-expanded="false" aria-autocomplete="list" aria-describedby="address-hint" />
+                    <div id="address-suggestions" class="suggestions address-suggestions" role="listbox" aria-label="Адреса" hidden></div>
+                  </div>
+                  <button class="secondary-button address-check" type="button" data-action="clean-address" data-address-field="order">Проверить адрес</button>
+                </div>
+                <p class="field-hint" id="address-hint" aria-live="polite">Начните вводить адрес — появятся подсказки.</p>
+                <label class="checkbox-field">
+                  <input id="order-save-address" type="checkbox" />
+                  <span>Сохранить адрес в профиле организации</span>
+                </label>
+              </div>
+            </div>
+            <label class="field order-comment-field">
+              <span>Комментарий к заказу</span>
+              <input id="order-comment" type="text" maxlength="500" autocomplete="off" placeholder="Например, время доставки или кому позвонить" />
+            </label>
+            <div class="field promo-field">
+              <label for="order-promo">Промокод</label>
+              <div class="promo-row">
+                <input id="order-promo" type="text" maxlength="40" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Если есть" aria-describedby="promo-hint" />
+                <button class="secondary-button" type="button" data-action="apply-promo" id="promo-apply">Применить</button>
+              </div>
+              <p class="field-hint" id="promo-hint" aria-live="polite"></p>
+            </div>
+          </section>
+
+          <section class="order-section">
+            <div class="order-section-head">
+              <h3>Товары</h3>
+              <span class="cart-pill" aria-live="polite"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h2l2.4 11h10.2L20 8H6.2"/><circle cx="9" cy="19.5" r="1.3"/><circle cx="17" cy="19.5" r="1.3"/></svg> <span id="cart-count">0</span></span>
+            </div>
+            <div class="catalog-tools">
+              <label class="field">
+                <span class="visually-hidden">Поиск товара</span>
+                <input id="catalog-search" type="search" placeholder="Поиск по артикулу или названию" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span class="visually-hidden">Категория</span>
+                <select id="catalog-category"></select>
+              </label>
+            </div>
+            <p class="catalog-note" id="catalog-note"></p>
+            <div class="catalog-list" id="catalog-list"></div>
+          </section>
+
+          <div class="order-footer">
+            <div class="order-summary">
+              <span id="cart-positions">Товары не выбраны</span>
+              <span class="cart-discount" id="cart-discount" hidden></span>
+              <strong id="cart-total">0 ₽</strong>
+            </div>
+            <button class="primary-button" type="submit" id="order-submit">Оформить заказ <span>→</span></button>
+          </div>
+          <p class="form-message" id="order-message" role="alert"></p>
+        </form>
+      </div>
+    </div>
+
+    <div id="order-details-modal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="order-details-title" tabindex="-1">
+      <div class="modal-card modal-card-wide">
+        <button class="modal-close" type="button" data-action="close-modal" aria-label="Закрыть">×</button>
+        <p class="eyebrow">Заказ</p>
+        <h2 id="order-details-title">—</h2>
+        <p class="modal-subtitle" id="order-details-meta"></p>
+        <div id="order-details-body"></div>
+        <div class="order-footer">
+          <div class="order-summary">
+            <span>Итого</span>
+            <strong id="order-details-total">—</strong>
+          </div>
+          <button class="primary-button" type="button" data-action="repeat-order">Повторить заказ <span>↻</span></button>
+        </div>
+      </div>
+    </div>
+
+    <div id="profile-modal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="profile-modal-title" tabindex="-1">
+      <div class="modal-card">
+        <button class="modal-close" type="button" data-action="close-modal" aria-label="Закрыть">×</button>
+        <p class="eyebrow">Профиль</p>
+        <h2 id="profile-modal-title">Контактное лицо</h2>
+        <p class="modal-subtitle">Эти данные используются в заказах и для входа.</p>
+        <form id="profile-form" class="auth-form">
+          <label class="field">
+            <span>Ваше имя</span>
+            <input id="profile-edit-name" type="text" autocomplete="name" required />
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input id="profile-edit-email" type="email" autocomplete="email" required />
+          </label>
+          <label class="field">
+            <span>Телефон для связи</span>
+            <input id="profile-edit-phone" type="tel" autocomplete="tel" placeholder="+7 900 000-00-00" />
+          </label>
+          <button class="primary-button" type="submit">Сохранить <span>→</span></button>
+          <p class="form-message" id="profile-message" role="alert"></p>
+        </form>
+      </div>
+    </div>
+
+    <div id="address-modal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="address-modal-title" tabindex="-1">
+      <div class="modal-card">
+        <button class="modal-close" type="button" data-action="close-modal" aria-label="Закрыть">×</button>
+        <p class="eyebrow">Адреса доставки</p>
+        <h2 id="address-modal-title">Новый адрес</h2>
+        <p class="modal-subtitle">Адрес появится в списке при оформлении заказа.</p>
+        <form id="address-form" class="auth-form" novalidate>
+          <label class="field">
+            <span>Название</span>
+            <input id="address-edit-label" type="text" maxlength="60" placeholder="Например, Склад на Сухонской" />
+          </label>
+          <div class="field address-field">
+            <label for="address-edit-value">Адрес *</label>
+            <div class="address-row">
+              <div class="search-field">
+                <input id="address-edit-value" type="text" autocomplete="off" placeholder="Город, улица, дом" role="combobox" aria-controls="address-edit-suggestions" aria-expanded="false" aria-autocomplete="list" aria-describedby="address-edit-hint" />
+                <div id="address-edit-suggestions" class="suggestions address-suggestions" role="listbox" aria-label="Адреса" hidden></div>
+              </div>
+              <button class="secondary-button address-check" type="button" data-action="clean-address" data-address-field="saved">Проверить адрес</button>
+            </div>
+            <p class="field-hint" id="address-edit-hint" aria-live="polite">Начните вводить адрес — появятся подсказки.</p>
+          </div>
+          <label class="checkbox-field">
+            <input id="address-edit-default" type="checkbox" />
+            <span>Использовать по умолчанию</span>
+          </label>
+          <button class="primary-button" type="submit">Сохранить адрес</button>
+          <p class="form-message" id="address-message" role="alert"></p>
+        </form>
+      </div>
+    </div>
+
+    <div id="company-modal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="company-modal-title" tabindex="-1">
+      <div class="modal-card">
+        <button class="modal-close" type="button" data-action="close-modal" aria-label="Закрыть">×</button>
+        <p class="eyebrow">Юрлица</p>
+        <h2 id="company-modal-title">Добавить юрлицо</h2>
+        <p class="modal-subtitle">Найдите организацию или ИП по ИНН — реквизиты заполнятся автоматически. Юрлицо сразу появится в переключателе и в оформлении заказа.</p>
+        <form id="company-form" class="auth-form" novalidate>
+          <div class="field company-field">
+            <label for="company-add-query">ИНН или название</label>
+            <div class="search-field">
+              <input id="company-add-query" type="text" autocomplete="off" placeholder="Введите ИНН или название" />
+              <span class="search-spinner" id="company-add-spinner" role="status" aria-label="Ищем организацию"></span>
+            </div>
+            <div id="company-add-results" class="company-results" role="listbox" aria-label="Найденные организации"></div>
+          </div>
+          <p class="form-message" id="company-message" role="alert"></p>
+        </form>
+      </div>
+    </div>
+
+    <script src="catalog.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
