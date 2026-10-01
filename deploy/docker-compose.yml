@@ -1,0 +1,36 @@
+# Запуск на сервере: кабинет + Caddy (HTTPS-сертификат Let's Encrypt выпускается и продлевается сам).
+# cd deploy && cp ../.env.example .env && (заполнить .env) && docker compose up -d --build
+services:
+  app:
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TRUST_PROXY: "1"
+      COOKIE_SECURE: "1"
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?укажите DOMAIN в .env, например b2b.styx-naturcosmetic.ru}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  caddy_data:
+  caddy_config:

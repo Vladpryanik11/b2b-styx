@@ -498,3 +498,8 @@ h1, h2, h3, h4 { line-height: 1.2; text-wrap: balance; }
 @media (max-width: 640px) {
   #order-details-modal .order-footer [data-action="resend-order"] { order: 3; width: 100%; margin-left: 0; }
 }
+.checkbox-field a { color: var(--green-dark); font-weight: 600; }
+.checkbox-field a:hover { color: var(--green); }
+.order-status.new { color: #2c5d8f; background: #e5eef8; }
+/* Пока кабинет спрашивает сервер о сессии, форму входа не показываем, чтобы она не мигала */
+.is-booting .auth-screen, .is-booting .app-screen { visibility: hidden; }

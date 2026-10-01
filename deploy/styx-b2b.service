@@ -1,0 +1,25 @@
+# Вариант без Docker: systemd запускает кабинет и перезапускает его при сбое и после перезагрузки сервера.
+# Установка: см. deploy/README.md, раздел «Без Docker».
+[Unit]
+Description=STYX B2B cabinet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=styx
+WorkingDirectory=/opt/styx-b2b
+EnvironmentFile=/opt/styx-b2b/.env
+Environment=NODE_ENV=production TRUST_PROXY=1 COOKIE_SECURE=1
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning server.js
+Restart=always
+RestartSec=5
+# Ограничения: процесс может писать только в папку с базой.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/styx-b2b/data
+
+[Install]
+WantedBy=multi-user.target

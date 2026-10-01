@@ -99,10 +99,33 @@
             </div>
             <label class="checkbox-field">
               <input id="register-consent" type="checkbox" required />
-              <span>Соглашаюсь с обработкой данных для оформления заказов</span>
+              <span>Соглашаюсь с <a href="privacy.html" target="_blank" rel="noopener">обработкой персональных данных</a> для оформления заказов</span>
             </label>
             <button class="primary-button" type="submit">Создать кабинет <span>→</span></button>
             <p class="form-message" id="register-message"></p>
+          </form>
+
+          <!-- Восстановление пароля: работает только на сервере (письмо со ссылкой) -->
+          <form id="forgot-form" class="auth-form is-hidden" aria-labelledby="auth-title">
+            <label class="field">
+              <span>Email кабинета</span>
+              <input id="forgot-email" type="email" autocomplete="email" placeholder="name@company.ru" required />
+            </label>
+            <button class="primary-button" type="submit">Прислать ссылку <span>→</span></button>
+            <button class="text-button" type="button" data-auth-tab="login">Вернуться ко входу</button>
+            <p class="form-message" id="forgot-message" role="status"></p>
+          </form>
+
+          <form id="reset-form" class="auth-form is-hidden" aria-labelledby="auth-title">
+            <label class="field">
+              <span>Новый пароль</span>
+              <div class="password-field">
+                <input id="reset-password" type="password" autocomplete="new-password" placeholder="Не короче 8 символов" minlength="8" required />
+                <button class="password-toggle" type="button" data-password-toggle="#reset-password" aria-label="Показать пароль">Показать</button>
+              </div>
+            </label>
+            <button class="primary-button" type="submit">Сохранить пароль <span>→</span></button>
+            <p class="form-message" id="reset-message" role="status"></p>
           </form>
 
           <p class="auth-footnote">Регистрация нужна, чтобы не вводить реквизиты заново при каждом заказе.</p>

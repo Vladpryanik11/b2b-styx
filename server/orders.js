@@ -31,7 +31,7 @@ function loadCatalog(file = path.join(__dirname, "..", "catalog.js")) {
   const { CATALOG } = vm.runInContext(`${fs.readFileSync(file, "utf8")}\n;({ CATALOG })`, context);
   const bySku = new Map();
   CATALOG.forEach((product) => product.variants.forEach((variant) => {
-    bySku.set(skuKey(variant.sku), { sku: variant.sku, name: `${product.name} ${variant.volume}`.trim(), price: variant.price });
+    bySku.set(skuKey(variant.sku), { sku: variant.sku, name: `${product.name} ${variant.volume}`.trim(), productName: product.name, volume: variant.volume, price: variant.price });
   }));
   return bySku;
 }
@@ -43,7 +43,10 @@ async function spbSkus() {
 
 const text = (value, max) => (typeof value === "string" ? value.trim().slice(0, max) : "");
 
-/** Проверяет заказ из браузера и пересчитывает цены и скидку по каталогу сервера. */
+/**
+ * Проверяет заказ и пересчитывает цены и скидку по каталогу сервера.
+ * company и contact сервер подставляет сам из учётной записи; номер и дату назначает база (необязательны).
+ */
 function normalizeOrder(raw, catalog) {
   const errors = [];
   const order = {
@@ -64,7 +67,7 @@ function normalizeOrder(raw, catalog) {
     address: text(raw?.address, 500),
     comment: text(raw?.comment, 500)
   };
-  if (!/^[\w-]{1,40}$/.test(order.number)) errors.push("Неверный номер заказа");
+  if (order.number && !/^[\w-]{1,40}$/.test(order.number)) errors.push("Неверный номер заказа");
   if (!order.company.name || !/^\d{10}(\d{2})?$/.test(order.company.inn)) errors.push("Нет названия или ИНН организации");
   if (order.delivery === "Самовывоз") order.address = PICKUP_ADDRESS;
   else if (!order.address) errors.push("Нет адреса доставки");

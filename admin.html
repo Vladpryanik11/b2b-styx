@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>STYX B2B — кабинет менеджера</title>
+    <link rel="preload" href="fonts/montserrat-cyrillic.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="admin.css" />
+  </head>
+  <body class="admin">
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <!-- Вход менеджера: та же форма входа, что у клиентов, плюс восстановление пароля -->
+    <section id="admin-auth" class="admin-auth is-hidden">
+      <div class="auth-card admin-auth-card">
+        <img class="brand-logo admin-auth-logo" src="styx-logo.png" alt="STYX Naturcosmetic" width="598" height="227" />
+        <div class="auth-heading">
+          <p class="eyebrow">Кабинет менеджера</p>
+          <h1 id="admin-auth-title">Вход для сотрудников</h1>
+        </div>
+
+        <form id="admin-login-form" class="auth-form">
+          <label class="field">Email
+            <input id="admin-login-email" type="email" autocomplete="username" required />
+          </label>
+          <label class="field">Пароль
+            <input id="admin-login-password" type="password" autocomplete="current-password" required />
+          </label>
+          <button class="primary-button" type="submit">Войти <span>→</span></button>
+          <button class="text-button" type="button" data-auth-mode="forgot">Забыли пароль?</button>
+          <p class="form-message" id="admin-login-message" role="alert"></p>
+        </form>
+
+        <form id="admin-forgot-form" class="auth-form is-hidden">
+          <p class="admin-auth-note">Укажите рабочий email — пришлём ссылку для смены пароля.</p>
+          <label class="field">Email
+            <input id="admin-forgot-email" type="email" autocomplete="username" required />
+          </label>
+          <button class="primary-button" type="submit">Отправить ссылку</button>
+          <button class="text-button" type="button" data-auth-mode="login">Вернуться ко входу</button>
+          <p class="form-message" id="admin-forgot-message" role="alert"></p>
+        </form>
+
+        <form id="admin-reset-form" class="auth-form is-hidden">
+          <p class="admin-auth-note">Придумайте новый пароль — не короче 8 символов.</p>
+          <label class="field">Новый пароль
+            <input id="admin-reset-password" type="password" autocomplete="new-password" minlength="8" required />
+          </label>
+          <button class="primary-button" type="submit">Сохранить пароль</button>
+          <p class="form-message" id="admin-reset-message" role="alert"></p>
+        </form>
+      </div>
+    </section>
+
+    <section id="admin-app" class="is-hidden">
+      <header class="topbar admin-topbar">
+        <a class="brand brand-link" href="/admin" aria-label="Кабинет менеджера STYX">
+          <img class="brand-logo" src="styx-logo.png" alt="STYX Naturcosmetic" width="598" height="227" />
+        </a>
+        <nav class="main-nav admin-nav" aria-label="Разделы">
+          <button type="button" class="nav-link is-active" data-tab="orders" aria-current="page">Заказы</button>
+          <button type="button" class="nav-link" data-tab="clients">Клиенты <span id="pending-badge" class="admin-badge" hidden></span></button>
+        </nav>
+        <div class="admin-user">
+          <span id="admin-user-name"></span>
+          <button type="button" class="text-button" data-action="logout">Выйти</button>
+        </div>
+      </header>
+
+      <main class="admin-main">
+        <section id="orders-tab" aria-labelledby="orders-title">
+          <div class="admin-heading">
+            <h1 id="orders-title" tabindex="-1">Заказы</h1>
+            <div class="admin-filters">
+              <label class="field admin-filter">Поиск
+                <input id="orders-search" type="search" placeholder="Номер, клиент, ИНН" />
+              </label>
+              <label class="field admin-filter">Статус
+                <select id="orders-status-filter"><option value="">Все</option></select>
+              </label>
+              <button type="button" class="secondary-button compact" data-action="refresh">Обновить</button>
+            </div>
+          </div>
+          <div id="orders-list" class="admin-list" aria-live="polite"></div>
+        </section>
+
+        <section id="clients-tab" class="is-hidden" aria-labelledby="clients-title">
+          <div class="admin-heading">
+            <h1 id="clients-title" tabindex="-1">Клиенты</h1>
+            <div class="chips admin-chips" role="group" aria-label="Фильтр клиентов">
+              <button type="button" class="chip is-active" data-client-filter="" aria-pressed="true">Все</button>
+              <button type="button" class="chip" data-client-filter="pending" aria-pressed="false">Ждут подтверждения</button>
+              <button type="button" class="chip" data-client-filter="active" aria-pressed="false">Активные</button>
+              <button type="button" class="chip" data-client-filter="blocked" aria-pressed="false">Заблокированные</button>
+            </div>
+          </div>
+          <div id="clients-list" class="admin-list" aria-live="polite"></div>
+        </section>
+      </main>
+    </section>
+
+    <script src="admin.js"></script>
+  </body>
+</html>

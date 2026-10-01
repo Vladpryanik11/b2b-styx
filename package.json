@@ -3,11 +3,11 @@
   "private": true,
   "description": "STYX B2B — личный кабинет оптового клиента",
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test tests/*.test.js"
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13"
   },
   "dependencies": {
     "jszip": "^3.10.2",

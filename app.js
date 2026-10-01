@@ -7,6 +7,7 @@ const DADATA_PROXY_URL = "/api/dadata/party";
 const ADDRESS_SUGGEST_URL = "/api/dadata/address";
 const ADDRESS_CLEAN_URL = "/api/dadata/clean-address";
 const ORDERS_URL = "/api/orders";
+const SESSION_URL = "/api/session";
 const ADDRESS_HINT = "Начните вводить адрес — появятся подсказки.";
 // Значения переключателя юрлиц: «Все юрлица» и пункт «Добавить юрлицо…».
 const ALL_COMPANIES = "all";
@@ -24,6 +25,11 @@ const IS_DEMO = Boolean(window.STYX_DEMO_SEED);
 const DEMO_SEARCH_HINT = "В демо-версии поиск работает по тестовым организациям: ИНН 7701234567, 7702345678, 7705123456, 770412345678. В рабочем кабинете найдётся любая организация или ИП.";
 
 let store = loadStore();
+// Режим сервера: учётные записи, юрлица и заказы хранятся в базе server.js, вход — по cookie сессии.
+// Без сервера (демо, открытый файл, статический хостинг) кабинет работает как прототип на localStorage.
+let serverMode = false;
+let accountSyncTimer = null;
+let lastSyncedAccount = "";
 let selectedCompany = null;
 let searchTimer = null;
 let searchController = null;
@@ -61,6 +67,8 @@ const PICKUP_ADDRESS = "г. Москва, ул. Сущевская, д. 23";
 const PROMO_CODES = { XSIZE: 10, LANDGROUP: 10 };
 
 const COMPLETED_STATUS = "Завершён";
+const CANCELLED_STATUS = "Отменён";
+const NEW_STATUS = "Новый";
 const NOT_SENT_STATUS = "Не отправлен";
 const priceFormatter = new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 });
 const formatPrice = (value) => priceFormatter.format(Number(value) || 0);
@@ -219,9 +227,96 @@ function findVariant(sku) {
 
 function saveStore() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    // На сервере в браузере остаётся только корзина: учётная запись и заказы живут в базе.
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(serverMode ? { cart: store.cart } : store));
   } catch {
     // Хранилище недоступно (приватный режим, запрет cookies): прототип продолжает работать в памяти.
+  }
+  if (serverMode) scheduleAccountSync();
+}
+
+// ---------- Сервер: сессия и сохранение кабинета ----------
+
+async function apiRequest(method, url, body) {
+  try {
+    const response = await fetch(url, {
+      method,
+      credentials: "same-origin",
+      headers: body === undefined ? { Accept: "application/json" } : { "Content-Type": "application/json", Accept: "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    const data = await response.json().catch(() => ({}));
+    return { ok: response.ok, status: response.status, data };
+  } catch {
+    return { ok: false, status: 0, data: { error: "Сервер недоступен. Проверьте соединение и попробуйте ещё раз." } };
+  }
+}
+
+const accountSnapshot = () => (store.account ? JSON.stringify({ companies: store.account.companies, activeCompanyId: store.account.activeCompanyId }) : "");
+
+// Юрлица и адреса сохраняются на сервере с небольшой задержкой, чтобы серия правок ушла одним запросом.
+function scheduleAccountSync() {
+  clearTimeout(accountSyncTimer);
+  if (!store.session || accountSnapshot() === lastSyncedAccount) return;
+  accountSyncTimer = setTimeout(syncAccount, 400);
+}
+
+async function syncAccount() {
+  const snapshot = accountSnapshot();
+  if (!snapshot || snapshot === lastSyncedAccount) return;
+  const { ok, status, data } = await apiRequest("PUT", "/api/account", { account: JSON.parse(snapshot) });
+  if (ok) {
+    lastSyncedAccount = snapshot;
+    return;
+  }
+  if (status === 401 || status === 403) return endServerSession(data.error || "Сессия закончилась. Войдите снова.");
+  showToast(`Изменения не сохранены на сервере: ${data.error || "попробуйте ещё раз"}`);
+}
+
+// Ответ сервера с пользователем превращается в тот же store, с которым работает весь кабинет.
+function applyServerSession(data) {
+  if (data.user?.role === "manager") {
+    window.location.href = "/admin";
+    return false;
+  }
+  if (!data.user || !data.account?.companies?.length) {
+    store = { account: null, session: false, orders: [], cart: store.cart };
+    lastSyncedAccount = "";
+    return false;
+  }
+  const { name, email, phone } = data.user;
+  store = normalizeStore({
+    account: { user: { name, email, phone: phone || "", passwordHash: "" }, companies: data.account.companies, activeCompanyId: data.account.activeCompanyId },
+    session: true,
+    orders: Array.isArray(data.orders) ? data.orders.slice().reverse() : [],
+    cart: store.cart
+  });
+  lastSyncedAccount = accountSnapshot();
+  return Boolean(store.account);
+}
+
+function endServerSession(message) {
+  store = { account: null, session: false, orders: [], cart: store.cart };
+  lastSyncedAccount = "";
+  closeModal({ restoreFocus: false });
+  showAuth();
+  switchAuthTab("login");
+  if (message) setMessage("#login-message", message);
+}
+
+// Есть ли рядом server.js. Демо и открытый с диска файл сервер не спрашивают.
+async function detectServer() {
+  if (IS_DEMO || !/^https?:$/.test(location.protocol)) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(SESSION_URL, { credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal });
+    const data = response.ok ? await response.json() : null;
+    return data?.mode === "server" ? data : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -382,21 +477,27 @@ function setMessage(selector, message, success = false) {
   element.classList.toggle("success", success);
 }
 
+const AUTH_TEXT = {
+  login: ["Вход в кабинет", "Используйте email и пароль, чтобы продолжить."],
+  register: ["Создайте кабинет", "Укажите ИНН — мы подставим реквизиты организации автоматически."],
+  forgot: ["Восстановление пароля", "Укажите email кабинета — пришлём ссылку, чтобы задать новый пароль."],
+  reset: ["Новый пароль", "Придумайте новый пароль для входа в кабинет."]
+};
+
 function switchAuthTab(tab) {
-  const isRegister = tab === "register";
-  $$('[data-auth-tab]').forEach((button) => {
+  $$('.auth-tab[data-auth-tab]').forEach((button) => {
     const isActive = button.dataset.authTab === tab;
     button.classList.toggle("is-active", isActive);
     button.setAttribute("aria-selected", String(isActive));
   });
-  $("#login-form").classList.toggle("is-hidden", isRegister);
-  $("#register-form").classList.toggle("is-hidden", !isRegister);
-  $("#login-form").setAttribute("aria-hidden", String(isRegister));
-  $("#register-form").setAttribute("aria-hidden", String(!isRegister));
-  $("#auth-title").textContent = isRegister ? "Создайте кабинет" : "Вход в кабинет";
-  $("#auth-subtitle").textContent = isRegister ? "Укажите ИНН — мы подставим реквизиты организации автоматически." : "Используйте email и пароль, чтобы продолжить.";
-  setMessage("#login-message", "");
-  setMessage("#register-message", "");
+  $(".auth-tabs").classList.toggle("is-hidden", tab === "forgot" || tab === "reset");
+  ["login", "register", "forgot", "reset"].forEach((name) => {
+    $(`#${name}-form`).classList.toggle("is-hidden", name !== tab);
+    $(`#${name}-form`).setAttribute("aria-hidden", String(name !== tab));
+    setMessage(`#${name}-message`, "");
+  });
+  $("#auth-title").textContent = AUTH_TEXT[tab][0];
+  $("#auth-subtitle").textContent = AUTH_TEXT[tab][1];
 }
 
 function showApp() {
@@ -494,7 +595,7 @@ function renderCompaniesList() {
 
 function renderOrders() {
   const orders = visibleOrders();
-  const active = orders.filter((order) => order.status !== COMPLETED_STATUS).length;
+  const active = orders.filter((order) => order.status !== COMPLETED_STATUS && order.status !== CANCELLED_STATUS).length;
   const completed = orders.filter((order) => order.status === COMPLETED_STATUS).length;
   $("#orders-count").textContent = orders.length;
   $("#orders-active").textContent = active;
@@ -512,7 +613,9 @@ function orderTotalLabel(order) {
 }
 
 function orderRow(order) {
-  const statusClass = order.status === COMPLETED_STATUS ? "done" : order.status === NOT_SENT_STATUS ? "warn" : "work";
+  const statusClass = order.status === COMPLETED_STATUS ? "done"
+    : order.status === NOT_SENT_STATUS || order.status === CANCELLED_STATUS ? "warn"
+    : order.status === NEW_STATUS ? "new" : "work";
   const positions = Array.isArray(order.items) ? order.items.length : 0;
   const summary = positions ? ` · ${positions} ${plural(positions, ["позиция", "позиции", "позиций"])}` : "";
   // В режиме «Все юрлица» в строке видно, от какого юрлица заказ.
@@ -819,6 +922,25 @@ async function sendOrder(order, company) {
   }
 }
 
+// На сервере номер, цены и статус заказа назначает сервер; письмо менеджеру уходит оттуда же.
+// Даже если письмо не ушло, заказ сохранён в базе и виден менеджеру в кабинете.
+async function sendServerOrder(order) {
+  const { ok, status, data } = await apiRequest("POST", ORDERS_URL, {
+    companyId: order.companyId,
+    delivery: order.delivery,
+    address: order.address,
+    comment: order.comment,
+    items: order.items.map(({ sku, qty }) => ({ sku, qty })),
+    promoCode: order.promoCode || ""
+  });
+  if (ok) return { sent: data.mailStatus === "sent", order: data.order };
+  if (status === 401 || status === 403) {
+    closeModal({ restoreFocus: false });
+    endServerSession(data.error || "Сессия закончилась. Войдите снова — корзина сохранена.");
+  }
+  return { error: data.error || "сервер не ответил, попробуйте ещё раз." };
+}
+
 async function handleCreateOrder(event) {
   event.preventDefault();
   const submitButton = $("#order-submit");
@@ -872,14 +994,15 @@ async function handleCreateOrder(event) {
   };
   submitButton.disabled = true;
   setMessage("#order-message", "Отправляем заказ…");
-  const result = await sendOrder(order, company);
+  const result = serverMode ? await sendServerOrder(order) : await sendOrder(order, company);
+  if (result.order) Object.assign(order, result.order);
   submitButton.disabled = false;
   if (result.error) {
     setMessage("#order-message", `Заказ не отправлен: ${result.error}`);
     return;
   }
   setMessage("#order-message", "");
-  if (!result.sent) order.status = IS_DEMO ? order.status : NOT_SENT_STATUS;
+  if (!result.sent && !serverMode) order.status = IS_DEMO ? order.status : NOT_SENT_STATUS;
   store.orders.push(order);
   if (delivery === "Доставка" && isNewAddress && $("#order-save-address").checked) {
     saveDeliveryAddress({ companyId: company.id, label: "", address, isDefault: !deliveryAddresses(company.id).length });
@@ -899,8 +1022,8 @@ async function handleCreateOrder(event) {
   lastFocusedElement = null;
   navigateTo("orders");
   $("#orders-view h1").focus();
-  const saved = companies().length > 1 ? `Заказ ${orderNumber} от ${companyTitle(company)}` : `Заказ ${orderNumber}`;
-  showToast(result.sent ? `${saved} отправлен менеджеру` : `${saved} сохранён, но ${result.reason}`);
+  const saved = companies().length > 1 ? `Заказ ${order.number} от ${companyTitle(company)}` : `Заказ ${order.number}`;
+  showToast(result.sent ? `${saved} отправлен менеджеру` : serverMode ? `${saved} принят — менеджер увидит его в своём кабинете` : `${saved} сохранён, но ${result.reason}`);
 }
 
 // ---------- Адрес доставки: подсказки и стандартизация DaData ----------
@@ -1244,7 +1367,7 @@ function openProfileModal() {
   openModal("profile-modal", "#profile-edit-name");
 }
 
-function handleProfileSave(event) {
+async function handleProfileSave(event) {
   event.preventDefault();
   const name = $("#profile-edit-name").value.trim();
   const email = $("#profile-edit-email").value.trim().toLowerCase();
@@ -1260,6 +1383,16 @@ function handleProfileSave(event) {
   if (phone && phone.replace(/\D/g, "").length < 10) {
     setMessage("#profile-message", "Проверьте номер телефона.");
     return;
+  }
+  if (serverMode) {
+    const button = event.submitter;
+    if (button) button.disabled = true;
+    const { ok, data } = await apiRequest("PUT", "/api/account", { user: { name, email, phone } });
+    if (button) button.disabled = false;
+    if (!ok) {
+      setMessage("#profile-message", data.error || "Профиль не сохранён.");
+      return;
+    }
   }
   store.account.user = { ...store.account.user, name, email, phone };
   saveStore();
@@ -1287,14 +1420,16 @@ async function handleRegister(event) {
     setMessage("#register-message", "Проверьте email.");
     return;
   }
-  if (password.length < 6) {
-    setMessage("#register-message", "Пароль должен быть не короче 6 символов.");
+  const minLength = serverMode ? 8 : 6;
+  if (password.length < minLength) {
+    setMessage("#register-message", `Пароль должен быть не короче ${minLength} символов.`);
     return;
   }
   if (password !== confirmation) {
     setMessage("#register-message", "Пароли не совпадают.");
     return;
   }
+  if (serverMode) return registerOnServer(event, { name, email, password });
   if (store.account?.user?.email === email) {
     setMessage("#register-message", "Этот email уже зарегистрирован. Войдите в кабинет.");
     return;
@@ -1313,9 +1448,46 @@ async function handleRegister(event) {
   showApp();
 }
 
+async function registerOnServer(event, { name, email, password }) {
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  const company = normalizeCompanies([selectedCompany])[0];
+  const { ok, data } = await apiRequest("POST", "/api/auth/register", { name, email, password, company, consent: $("#register-consent").checked });
+  if (button) button.disabled = false;
+  if (!ok) {
+    setMessage("#register-message", data.error || "Не удалось создать кабинет.");
+    return;
+  }
+  selectedCompany = null;
+  event.target.reset();
+  if (data.status === "pending") {
+    // Кабинет откроется после проверки менеджером — клиенту придёт письмо.
+    switchAuthTab("login");
+    $("#login-email").value = email;
+    setMessage("#login-message", data.message, true);
+    return;
+  }
+  applyServerSession(data);
+  showToast("Кабинет создан — реквизиты сохранены");
+  showApp();
+}
+
 async function handleLogin(event) {
   event.preventDefault();
   const email = $("#login-email").value.trim().toLowerCase();
+  if (serverMode) {
+    const button = event.submitter;
+    if (button) button.disabled = true;
+    const { ok, data } = await apiRequest("POST", "/api/auth/login", { email, password: $("#login-password").value });
+    if (button) button.disabled = false;
+    if (!ok) {
+      setMessage("#login-message", data.error || "Не удалось войти.");
+      return;
+    }
+    event.target.reset();
+    if (applyServerSession(data)) showApp();
+    return;
+  }
   const passwordHash = await hashPassword($("#login-password").value);
   if (!store.account || store.account.user.email !== email || store.account.user.passwordHash !== passwordHash) {
     setMessage("#login-message", "Неверный email или пароль.");
@@ -1327,9 +1499,39 @@ async function handleLogin(event) {
   showApp();
 }
 
+async function handleForgot(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  const { ok, data } = await apiRequest("POST", "/api/auth/forgot", { email: $("#forgot-email").value.trim() });
+  if (button) button.disabled = false;
+  setMessage("#forgot-message", data.message || data.error || "Не удалось отправить ссылку.", ok);
+}
+
+async function handleReset(event) {
+  event.preventDefault();
+  const password = $("#reset-password").value;
+  if (password.length < 8) {
+    setMessage("#reset-message", "Пароль должен быть не короче 8 символов.");
+    return;
+  }
+  const token = new URLSearchParams(location.search).get("reset");
+  const { ok, data } = await apiRequest("POST", "/api/auth/reset", { token, password });
+  if (!ok) {
+    setMessage("#reset-message", data.error || "Не удалось сменить пароль.");
+    return;
+  }
+  history.replaceState(null, "", location.pathname);
+  event.target.reset();
+  switchAuthTab("login");
+  setMessage("#login-message", data.message, true);
+}
+
 function bindEvents() {
   $$('[data-auth-tab]').forEach((button) => button.addEventListener("click", () => switchAuthTab(button.dataset.authTab)));
   $("#login-form").addEventListener("submit", handleLogin);
+  $("#forgot-form").addEventListener("submit", handleForgot);
+  $("#reset-form").addEventListener("submit", handleReset);
   $("#register-form").addEventListener("submit", handleRegister);
   $("#order-form").addEventListener("submit", handleCreateOrder);
   $("#profile-form").addEventListener("submit", handleProfileSave);
@@ -1564,6 +1766,13 @@ function bindEvents() {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (!action) return;
     if (action === "logout") {
+      if (serverMode) {
+        apiRequest("POST", "/api/auth/logout", {});
+        endServerSession("");
+        writeView(null);
+        showToast("Вы вышли из кабинета");
+        return;
+      }
       store.session = false;
       saveStore();
       writeView(null);
@@ -1579,7 +1788,15 @@ function bindEvents() {
     if (action === "add-address") openAddressModal(null, event.target.closest("[data-action]").dataset.companyId || activeCompany()?.id);
     if (action === "add-company") openCompanyModal();
     if (action === "apply-promo") applyPromo();
-    if (action === "forgot-password") showToast("Восстановление пароля пока недоступно. Напишите менеджеру STYX.");
+    if (action === "forgot-password") {
+      if (serverMode) {
+        switchAuthTab("forgot");
+        $("#forgot-email").value = $("#login-email").value;
+        $("#forgot-email").focus();
+      } else {
+        showToast(IS_DEMO ? "В демо-версии восстановление пароля не работает: письмо со ссылкой отправляет сервер." : "Восстановление пароля работает, когда кабинет запущен на сервере. Сейчас напишите менеджеру STYX.");
+      }
+    }
     if (action === "edit-profile") openProfileModal();
   });
 
@@ -1612,9 +1829,29 @@ function bindEvents() {
   });
 }
 
-bindEvents();
-if (store.session && store.account) {
-  showApp();
-  // Прямая ссылка на оформление заказа: .../#new-order
-  if (location.hash === "#new-order") openOrderModal();
+async function boot() {
+  document.body.classList.add("is-booting");
+  bindEvents();
+  const server = await detectServer();
+  document.body.classList.remove("is-booting");
+  if (server) {
+    serverMode = true;
+    // Учётную запись прототипа из браузера не используем и стираем: на сервере остаётся только корзина.
+    store = { account: null, session: false, orders: [], cart: store.cart };
+    saveStore();
+    if (new URLSearchParams(location.search).get("reset")) {
+      showAuth();
+      switchAuthTab("reset");
+      $("#reset-password").focus();
+      return;
+    }
+    if (!applyServerSession(server)) return;
+  }
+  if (store.session && store.account) {
+    showApp();
+    // Прямая ссылка на оформление заказа: .../#new-order
+    if (location.hash === "#new-order") openOrderModal();
+  }
 }
+
+boot();
