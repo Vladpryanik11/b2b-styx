@@ -76,6 +76,7 @@ test("один заказ клиента: письмо менеджеру с д�
     assert.equal(client.attachments, undefined, "клиенту бланки не уходят — для него это один заказ");
 
     const spb = await readBlank(manager.attachments[0].content);
+    assert.match(spb.sheet, /<autoFilter ref="A6:E28"/, "фильтр пустых позиций есть и в бланке Питера");
     assert.deepEqual(spb.ordered, [["81016", 2], ["40125", 1]]);
     const msk = await readBlank(manager.attachments[1].content);
     assert.deepEqual(msk.ordered, [["82014", 3], ["15000", 5]]);
