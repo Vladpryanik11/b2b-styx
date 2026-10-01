@@ -1,15 +1,14 @@
-// Заполнение бланков заказа STYX в формате Excel (.xlsx).
-// Шаблоны — JSON, снятые с оригинальных бланков .xls скриптом tools/extract-blank.py:
-// значения ячеек, стили, высота строк и ширина колонок. Колонки бланка: A — пометка «*Д*»,
-// B — артикул, C — наименование, D — цена, E — заказ (количество).
+// Заполнение бланков заказа STYX (.xlsx) без изменения самих бланков.
+// Шаблоны blanks/*.xlsx — ваши бланки, один раз переведённые из .xls в .xlsx (LibreOffice, см. README).
+// В файле меняются только ячейки: «Контрагент» и количество в колонке «ЗАКАЗ» (E) у заказанных позиций.
+// Оформление, логотипы, формула «Сумма» (SUMPRODUCT), автофильтр, поля печати остаются как в оригинале:
+// правим XML листа точечно, а Excel пересчитывает формулы при открытии.
 const fs = require("node:fs");
 const path = require("node:path");
-const ExcelJS = require("exceljs");
+const JSZip = require("jszip");
 
 const BLANKS_DIR = path.join(__dirname, "..", "blanks");
-const COL = { mark: 0, sku: 1, name: 2, price: 3, qty: 4 };
-
-const templateCache = new Map();
+const SHEET = "xl/worksheets/sheet1.xml";
 
 // Артикулы прайса, которые в бланке записаны иначе.
 const SKU_ALIASES = { "13281Ч": "13281" };
@@ -20,153 +19,103 @@ function skuKey(value) {
   return SKU_ALIASES[key] || key;
 }
 
-function loadTemplate(file) {
+const xmlUnescape = (text) => text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+const xmlEscape = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// Общие строки: текст и исходный XML (строка может состоять из кусков с разным шрифтом).
+function sharedStrings(xml) {
+  return [...xml.matchAll(/<si>([\s\S]*?)<\/si>/g)].map(([, si]) => {
+    const text = new String(xmlUnescape([...si.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((m) => m[1]).join("")));
+    text.xml = si;
+    return text;
+  });
+}
+
+// Значение ячейки из XML листа: число, общая строка (t="s") или строка в ячейке.
+function cellValue(cellXml, strings) {
+  const value = cellXml.match(/<v>([\s\S]*?)<\/v>/)?.[1];
+  if (/\bt="s"/.test(cellXml)) return value === undefined ? "" : String(strings[Number(value)]);
+  if (/\bt="inlineStr"/.test(cellXml)) return xmlUnescape(cellXml.match(/<t[^>]*>([\s\S]*?)<\/t>/)?.[1] || "");
+  return value === undefined ? "" : xmlUnescape(value);
+}
+
+const CELL = String.raw`(?: [^>]*?)?(?:/>|>[\s\S]*?</c>)`;
+const cellPattern = (ref) => new RegExp(`<c r="${ref}"${CELL}`);
+
+const templateCache = new Map();
+
+/** Читает бланк: где позиции (артикул → строка и цена), где «Контрагент» и формула суммы. */
+async function loadTemplate(file) {
   if (!templateCache.has(file)) {
-    const template = JSON.parse(fs.readFileSync(path.join(BLANKS_DIR, file), "utf8"));
-    const value = (row, col) => template.rows[row]?.cells[col]?.[0];
-    const headerRow = template.rows.findIndex((row, index) => value(index, COL.sku) === "АРТ.");
-    const counterpartyRow = template.rows.findIndex((row, index) => String(value(index, COL.name)).startsWith("Контрагент"));
-    if (headerRow < 0 || counterpartyRow < 0) throw new Error(`Бланк ${file}: не найдены строки «АРТ.» или «Контрагент»`);
+    const buffer = fs.readFileSync(path.join(BLANKS_DIR, file));
+    const zip = await JSZip.loadAsync(buffer);
+    const sheet = await zip.file(SHEET).async("string");
+    const strings = sharedStrings(await zip.file("xl/sharedStrings.xml").async("string"));
+    const valueAt = (ref) => {
+      const cell = sheet.match(cellPattern(ref))?.[0];
+      return cell ? cellValue(cell, strings) : "";
+    };
+    let headerRow = 0;
     const items = new Map();
-    template.rows.forEach((row, index) => {
-      const sku = skuKey(value(index, COL.sku));
-      if (index > headerRow && sku && !items.has(sku)) items.set(sku, index);
-    });
-    templateCache.set(file, { ...template, headerRow, counterpartyRow, items });
+    for (const [cell, row] of sheet.matchAll(new RegExp(`<c r="B(\\d+)"${CELL}`, "g"))) {
+      const value = cellValue(cell, strings);
+      if (value === "АРТ.") headerRow = Number(row);
+      else if (headerRow && value !== "" && !items.has(skuKey(value))) {
+        items.set(skuKey(value), { row: Number(row), price: Number(valueAt(`D${row}`)) || 0 });
+      }
+    }
+    const counterparty = [...sheet.matchAll(new RegExp(`<c r="(C\\d+)"${CELL}`, "g"))]
+      .map(([cell, ref]) => ({ ref, cell }))
+      .find(({ cell }) => cellValue(cell, strings).trim().startsWith("Контрагент"));
+    const counterpartyRef = counterparty?.ref;
+    // Шрифты строки «Контрагент ____» сохраняем: подчёркивания заменяются названием организации.
+    const counterpartyXml = counterparty && /\bt="s"/.test(counterparty.cell)
+      ? strings[Number(counterparty.cell.match(/<v>(\d+)<\/v>/)[1])].xml
+      : "<t>Контрагент ____</t>";
+    const sumRef = sheet.match(/<c r="([A-Z]+\d+)"[^>]*><f[^>]*>SUMPRODUCT\(/)?.[1];
+    if (!headerRow || !counterpartyRef || !sumRef) throw new Error(`Бланк ${file}: не найдены «АРТ.», «Контрагент» или формула суммы`);
+    templateCache.set(file, { file, buffer, items, counterpartyRef, counterpartyXml, sumRef });
   }
   return templateCache.get(file);
 }
 
-function excelStyle(style = {}) {
-  const argb = (hex) => ({ argb: `FF${hex}` });
-  const font = { name: style.font?.name || "Arial", size: style.font?.size || 9 };
-  if (style.font?.bold) font.bold = true;
-  if (style.font?.italic) font.italic = true;
-  if (style.font?.color) font.color = argb(style.font.color);
-  const result = { font };
-  if (style.fill) result.fill = { type: "pattern", pattern: "solid", fgColor: argb(style.fill) };
-  if (style.align) result.alignment = { horizontal: style.align, vertical: "middle" };
-  if (style.border) result.border = Object.fromEntries(Object.entries(style.border).map(([side, kind]) => [side, { style: kind }]));
-  if (style.numFmt) result.numFmt = style.numFmt;
-  return result;
-}
-
-function applyStyle(cell, style) {
-  const { font, fill, alignment, border, numFmt } = excelStyle(style);
-  cell.font = font;
-  if (fill) cell.fill = fill;
-  if (alignment) cell.alignment = alignment;
-  if (border) cell.border = border;
-  if (numFmt) cell.numFmt = numFmt;
-}
-
-function addLogos(workbook, sheet, logos = []) {
-  logos.forEach(({ file, tl, width, height }) => {
-    const imageId = workbook.addImage({ filename: path.join(BLANKS_DIR, file), extension: "png" });
-    sheet.addImage(imageId, { tl, ext: { width, height }, editAs: "oneCell" });
-  });
+// Ставит значение в существующую ячейку, сохраняя её стиль (s="…").
+function setCell(sheet, ref, valueXml, type) {
+  const pattern = cellPattern(ref);
+  const cell = sheet.match(pattern)?.[0];
+  if (!cell) throw new Error(`Нет ячейки ${ref} в бланке`);
+  const style = cell.match(/ s="(\d+)"/)?.[1];
+  return sheet.replace(pattern, `<c r="${ref}"${style ? ` s="${style}"` : ""}${type ? ` t="${type}"` : ""}>${valueXml}</c>`);
 }
 
 /**
- * Собирает заполненный бланк.
- * form: { template, sheetName?, logos?, autoFilter? }
- * data: {
- *   counterparty: строка в ячейку «Контрагент»,
- *   info: строки с данными заказа (номер, доставка, комментарий…), вставляются под «Контрагентом»,
- *   lines: [{ sku, name, price, qty }] — позиции этого бланка
- * }
- * Позиции, которых нет в бланке, дописываются в конец отдельным разделом.
- * Цена в заполненной строке — цена заказа (действующий прайс), чтобы сумма бланка совпала с заказом.
+ * Заполняет бланк: «Контрагент» и количества в колонке «ЗАКАЗ».
+ * Позиции, которых в бланке нет, возвращаются в missing: бланк не дописываем, они идут в текст письма.
+ * data: { counterparty, lines: [{ sku, qty }] }
  */
-async function buildBlank(form, data) {
-  const template = loadTemplate(form.template);
-  const workbook = new ExcelJS.Workbook();
-  workbook.creator = "STYX B2B";
-  const sheet = workbook.addWorksheet(form.sheetName || template.sheet);
-  template.widths.forEach((width, index) => { sheet.getColumn(index + 1).width = width; });
-
-  const linesBySku = new Map();
-  const extras = [];
+async function buildBlank(file, data) {
+  const template = await loadTemplate(file);
+  const zip = await JSZip.loadAsync(template.buffer);
+  let sheet = await zip.file(SHEET).async("string");
+  const missing = [];
+  let total = 0;
   data.lines.forEach((line) => {
-    const key = skuKey(line.sku);
-    if (template.items.has(key) && !linesBySku.has(key)) linesBySku.set(key, line);
-    else extras.push(line);
+    const item = template.items.get(skuKey(line.sku));
+    if (!item) return missing.push(line);
+    sheet = setCell(sheet, `E${item.row}`, `<v>${line.qty}</v>`, "n");
+    total += item.price * line.qty;
   });
-
-  const infoStyle = { font: { name: "Arial", size: 9 }, align: "left" };
-  const infoBoldStyle = { font: { name: "Arial", size: 9, bold: true }, align: "left" };
-  let out = 0; // номер строки в итоговом листе (с 1)
-  let firstItemRow = 0;
-  let lastItemRow = 0;
-  let sumCell = null;
-
-  const writeRow = (cells, height) => {
-    out += 1;
-    const row = sheet.getRow(out);
-    if (height) row.height = height;
-    cells.forEach(([value, style], col) => {
-      const cell = row.getCell(col + 1);
-      if (value !== "" && value !== null && value !== undefined) cell.value = value;
-      applyStyle(cell, style);
-    });
-    return row;
-  };
-
-  // В оригинале после последней позиции идут пустые отформатированные строки — их не переносим.
-  const lastRow = template.rows.findLastIndex((row) => row.cells.some(([value]) => value !== ""));
-  template.rows.slice(0, lastRow + 1).forEach((tplRow, index) => {
-    const cells = tplRow.cells.map(([value, styleId]) => [value, template.styles[styleId]]);
-    if (index === template.counterpartyRow) {
-      cells[COL.name] = [data.counterparty, cells[COL.name][1]];
-      const row = writeRow(cells, tplRow.height);
-      // Длинное название организации ужимаем в ячейку, чтобы оно не наезжало на «Сумма:».
-      row.getCell(COL.name + 1).alignment = { horizontal: "center", vertical: "middle", shrinkToFit: true };
-      sumCell = row.getCell(COL.qty + 1);
-      (data.info || []).forEach(({ text, bold }) => {
-        const infoRow = writeRow([["", infoStyle], ["", infoStyle], [text, bold ? infoBoldStyle : infoStyle]]);
-        infoRow.getCell(COL.name + 1).alignment = { horizontal: "left", vertical: "middle" };
-      });
-      return;
-    }
-    const key = index > template.headerRow ? skuKey(cells[COL.sku][0]) : "";
-    const line = key && template.items.get(key) === index ? linesBySku.get(key) : null;
-    if (line) {
-      cells[COL.price] = [line.price, cells[COL.price][1]];
-      cells[COL.qty] = [line.qty, cells[COL.qty][1]];
-    }
-    const row = writeRow(cells, tplRow.height);
-    const email = cells.find(([value]) => typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value));
-    if (email) {
-      const cell = row.getCell(cells.indexOf(email) + 1);
-      cell.value = { text: email[0], hyperlink: `mailto:${email[0]}` };
-    }
-    if (key) {
-      firstItemRow ||= out;
-      lastItemRow = out;
-    }
-  });
-
-  if (extras.length) {
-    const itemIndex = template.items.values().next().value;
-    const sectionIndex = template.headerRow + 1;
-    const itemStyles = template.rows[itemIndex].cells.map(([, styleId]) => template.styles[styleId]);
-    const sectionStyles = template.rows[sectionIndex].cells.map(([, styleId]) => template.styles[styleId]);
-    writeRow(sectionStyles.map((style, col) => [col === COL.name ? "НЕТ В БЛАНКЕ (добавлено из заказа)" : "", style]));
-    extras.forEach((line) => {
-      writeRow(itemStyles.map((style, col) => [["", line.sku, line.name, line.price, line.qty][col] ?? "", style]));
-      lastItemRow = out;
-    });
+  if (data.counterparty) { // название организации, «Контрагент» уже есть в бланке
+    const filled = template.counterpartyXml.replace(/_{3,}/, xmlEscape(data.counterparty));
+    sheet = setCell(sheet, template.counterpartyRef, `<is>${filled}</is>`, "inlineStr");
   }
-
-  const total = data.lines.reduce((sum, line) => sum + line.price * line.qty, 0);
-  if (sumCell && firstItemRow) {
-    sumCell.value = { formula: `SUMPRODUCT(D${firstItemRow}:D${lastItemRow},E${firstItemRow}:E${lastItemRow})`, result: total };
-    sumCell.numFmt = "#,##0";
-  }
-  if (form.autoFilter) sheet.autoFilter = { from: { row: template.headerRow + 1 + (data.info || []).length, column: 1 }, to: { row: template.headerRow + 1 + (data.info || []).length, column: 5 } };
-  sheet.views = [{ state: "frozen", ySplit: template.headerRow + 1 + (data.info || []).length }];
-  addLogos(workbook, sheet, form.logos);
-  return { buffer: Buffer.from(await workbook.xlsx.writeBuffer()), total };
+  // Формулу не трогаем, обновляем только её сохранённый результат — он виден и до пересчёта.
+  sheet = sheet.replace(new RegExp(`(<c r="${template.sumRef}"[^>]*><f[^>]*>[^<]*</f>)<v>[^<]*</v>`), `$1<v>${total}</v>`);
+  zip.file(SHEET, sheet, { createFolders: false });
+  const workbook = (await zip.file("xl/workbook.xml").async("string")).replace(/<calcPr(?![^>]*fullCalcOnLoad)/, '<calcPr fullCalcOnLoad="1"');
+  zip.file("xl/workbook.xml", workbook, { createFolders: false });
+  const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  return { buffer, total, missing };
 }
 
 module.exports = { buildBlank, loadTemplate, skuKey };
