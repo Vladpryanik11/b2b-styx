@@ -20,7 +20,8 @@ function skuKey(value) {
 }
 
 const xmlUnescape = (text) => text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
-const xmlEscape = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// Управляющие символы (вставка из Word/Excel) недопустимы в XML: Excel счёл бы файл повреждённым.
+const xmlEscape = (text) => String(text).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 // Общие строки: текст и исходный XML (строка может состоять из кусков с разным шрифтом).
 function sharedStrings(xml) {
@@ -92,19 +93,21 @@ function setCell(sheet, ref, valueXml, type) {
 /**
  * Заполняет бланк: «Контрагент» и количества в колонке «ЗАКАЗ».
  * Позиции, которых в бланке нет, возвращаются в missing: бланк не дописываем, они идут в текст письма.
- * data: { counterparty, lines: [{ sku, qty }] }
+ * data: { counterparty, lines: [{ sku, qty, price? }] }; priceDiffs — позиции, где цена бланка отличается от прайса.
  */
 async function buildBlank(file, data) {
   const template = await loadTemplate(file);
   const zip = await JSZip.loadAsync(template.buffer);
   let sheet = await zip.file(SHEET).async("string");
   const missing = [];
+  const priceDiffs = [];
   let total = 0;
   data.lines.forEach((line) => {
     const item = template.items.get(skuKey(line.sku));
     if (!item) return missing.push(line);
     sheet = setCell(sheet, `E${item.row}`, `<v>${line.qty}</v>`, "n");
     total += item.price * line.qty;
+    if (line.price !== undefined && item.price !== line.price) priceDiffs.push({ ...line, blankPrice: item.price });
   });
   if (data.counterparty) { // название организации, «Контрагент» уже есть в бланке
     const filled = template.counterpartyXml.replace(/_{3,}/, () => xmlEscape(data.counterparty));
@@ -116,7 +119,7 @@ async function buildBlank(file, data) {
   const workbook = (await zip.file("xl/workbook.xml").async("string")).replace(/<calcPr(?![^>]*fullCalcOnLoad)/, '<calcPr fullCalcOnLoad="1"');
   zip.file("xl/workbook.xml", workbook, { createFolders: false });
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-  return { buffer, total, missing };
+  return { buffer, total, missing, priceDiffs };
 }
 
 module.exports = { buildBlank, loadTemplate, skuKey };

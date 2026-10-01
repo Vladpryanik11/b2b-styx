@@ -31,7 +31,7 @@ function loadCatalog(file = path.join(__dirname, "..", "catalog.js")) {
   const { CATALOG } = vm.runInContext(`${fs.readFileSync(file, "utf8")}\n;({ CATALOG })`, context);
   const bySku = new Map();
   CATALOG.forEach((product) => product.variants.forEach((variant) => {
-    bySku.set(skuKey(variant.sku), { sku: variant.sku, name: `${product.name} ${variant.volume}`.trim(), productName: product.name, volume: variant.volume, price: variant.price });
+    bySku.set(skuKey(variant.sku), { sku: variant.sku, name: `${product.name} ${variant.volume}`.trim(), productName: product.name, volume: variant.volume, price: variant.price, inStock: variant.inStock !== false });
   }));
   return bySku;
 }
@@ -40,6 +40,8 @@ function loadCatalog(file = path.join(__dirname, "..", "catalog.js")) {
 async function spbSkus() {
   return new Set((await loadTemplate(ENTITIES[0].template)).items.keys());
 }
+
+const MAX_QTY = 999; // как в корзине (app.js)
 
 const text = (value, max) => (typeof value === "string" ? value.trim().slice(0, max) : "");
 
@@ -77,11 +79,14 @@ function normalizeOrder(raw, catalog) {
     const key = skuKey(item?.sku);
     const qty = Number(item?.qty);
     if (!catalog.has(key)) return errors.push(`Нет в каталоге: ${String(item?.sku).slice(0, 20)}`);
-    if (!Number.isInteger(qty) || qty < 1 || qty > 9999) return errors.push(`Неверное количество для ${catalog.get(key).sku}`);
+    if (!Number.isInteger(qty) || qty < 1) return errors.push(`Неверное количество для ${catalog.get(key).sku}`);
+    if (!catalog.get(key).inStock) return errors.push(`Нет в наличии: ${catalog.get(key).sku}`);
     quantities.set(key, (quantities.get(key) || 0) + qty);
   });
+  // Лимит — на итоговое количество артикула, как в корзине: повтор строки его не обходит.
+  quantities.forEach((qty, key) => { if (qty > MAX_QTY) errors.push(`Больше ${MAX_QTY} шт. для ${catalog.get(key).sku}`); });
   if (!quantities.size && !errors.length) errors.push("В заказе нет товаров");
-  order.lines = [...quantities].map(([key, qty]) => ({ ...catalog.get(key), qty }));
+  order.lines = [...quantities].map(([key, qty]) => { const { inStock, ...item } = catalog.get(key); return { ...item, qty }; });
   order.subtotal = order.lines.reduce((sum, line) => sum + line.price * line.qty, 0);
 
   const promo = text(raw?.promoCode, 40).toUpperCase();
@@ -123,11 +128,11 @@ function requisitesLine(order) {
 async function buildOrderBlanks(order) {
   const parts = await splitOrder(order);
   return Promise.all(parts.map(async (part) => {
-    const { buffer, missing } = await buildBlank(part.entity.template, {
+    const { buffer, missing, total, priceDiffs } = await buildBlank(part.entity.template, {
       counterparty: order.company.name,
       lines: part.lines
     });
-    return { part, missing, filename: part.entity.fileName(order.number), content: buffer };
+    return { part, missing, blankTotal: total, priceDiffs, filename: part.entity.fileName(order.number), content: buffer };
   }));
 }
 
@@ -153,12 +158,16 @@ function managerMessage(order, blanks) {
     `Итого к оплате: ${rub(order.total)}`,
     "",
     `Для клиента это один заказ. Счета по юрлицам STYX (${blanks.length}):`,
-    ...blanks.flatMap(({ part, filename, missing }) => [
+    ...blanks.flatMap(({ part, filename, missing, blankTotal, priceDiffs = [] }) => [
       "",
       `${part.entity.title}: ${rub(part.subtotal)}${part.discount ? `, скидка ${rub(part.discount)}, к оплате ${rub(part.total)}` : ""}`,
       `Бланк: ${filename}`,
       ...part.lines.map((line) => `- ${line.sku} ${line.name}: ${line.qty} шт. × ${rub(line.price)}`),
-      ...(missing.length ? [`Нет в бланке, добавьте в счёт вручную: ${missing.map((line) => `${line.sku} ${line.name} — ${line.qty} шт.`).join("; ")}`] : [])
+      ...(missing.length ? [`Нет в бланке, добавьте в счёт вручную: ${missing.map((line) => `${line.sku} ${line.name} — ${line.qty} шт.`).join("; ")}`] : []),
+      ...(priceDiffs.length ? [
+        `Цены в бланке отличаются от прайса: ${priceDiffs.map((line) => `${line.sku} — в бланке ${rub(line.blankPrice)}, в прайсе ${rub(line.price)}`).join("; ")}.`,
+        `Сумма в бланке ${rub(blankTotal)} (без скидки); к оплате — по прайсу, как в этом письме.`
+      ] : [])
     ])
   ];
   return {

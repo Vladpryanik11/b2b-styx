@@ -168,7 +168,7 @@ function orderItem(order) {
       <div class="admin-details-body">
         <dl class="admin-facts">
           <dt>Юрлицо</dt><dd>${escapeHtml(company.name || order.companyName)}</dd>
-          <dt>Реквизиты</dt><dd>ИНН ${escapeHtml(company.inn || "—")}${company.kpp ? `, КПП ${escapeHtml(company.kpp)}` : ""}</dd>
+          <dt>Реквизиты</dt><dd>ИНН ${escapeHtml(company.inn || "—")}${company.kpp && company.kpp !== "—" ? `, КПП ${escapeHtml(company.kpp)}` : ""}</dd>
           <dt>Юр. адрес</dt><dd>${escapeHtml(company.address || "—")}</dd>
           <dt>Контакт</dt><dd>${escapeHtml(order.client ? [order.client.name, order.client.phone, order.client.email].filter(Boolean).join(", ") : "—")}</dd>
           <dt>Получение</dt><dd>${escapeHtml(order.delivery)}: ${escapeHtml(order.address || "—")}</dd>
@@ -283,15 +283,30 @@ async function setClientStatus(button) {
     ? `Отклонить заявку ${client.name} (${client.email})? Войти в кабинет будет нельзя.`
     : `Закрыть доступ к кабинету для ${client.name}? Клиент сразу выйдет из кабинета.`;
   if (status === "blocked" && !window.confirm(question)) return;
+  // Соседние карточки — запасная цель фокуса, если эта уйдёт из отфильтрованного списка.
+  const cards = $$("[data-client-card]");
+  const index = cards.findIndex((card) => card.dataset.clientCard === String(client.id));
+  const neighbour = cards[index + 1] || cards[index - 1];
   button.disabled = true;
-  const { ok, data } = await api("POST", `/api/admin/clients/${client.id}/status`, { status });
+  const { ok, status: code, data } = await api("POST", `/api/admin/clients/${client.id}/status`, { status, from: client.status });
   button.disabled = false;
+  if (code === 409) {
+    // Другой менеджер уже решил по этому клиенту: показываем актуальный список, ничего не меняя.
+    const fresh = await api("GET", "/api/admin/clients");
+    if (fresh.ok) state.clients = fresh.data.clients;
+    render();
+    refocus(`[data-client-card="${client.id}"]`) || refocus("#clients-title");
+    return showToast(data.error);
+  }
   if (!ok) return showToast(data.error || "Не удалось изменить доступ.");
   const firstApproval = !client.approvedAt && status === "active";
   client.status = data.client.status;
   if (firstApproval) client.approvedAt = new Date().toISOString();
   render();
-  refocus(`[data-client-card="${client.id}"] [data-set-status]`) || refocus(`[data-client-card="${client.id}"]`);
+  refocus(`[data-client-card="${client.id}"] [data-set-status]`)
+    || refocus(`[data-client-card="${client.id}"]`)
+    || (neighbour && refocus(`[data-client-card="${neighbour.dataset.clientCard}"] [data-set-status]`))
+    || refocus("[data-client-filter].is-active");
   showToast(status === "active"
     ? (firstApproval ? `Кабинет открыт, ${client.email} получит письмо` : "Доступ восстановлен")
     : (wasPending ? "Заявка отклонена" : "Доступ закрыт"));

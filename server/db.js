@@ -111,14 +111,22 @@ function openDb(file = ":memory:") {
     userByEmail: (email) => rowToUser(one("SELECT * FROM users WHERE email = ?", email)),
     updateUser(id, { name, phone, email, profile }) {
       const user = this.userById(id);
+      // Ссылка сброса, отправленная на прежний адрес, после смены email не работает.
+      if (email && email !== user.email) run("DELETE FROM reset_tokens WHERE user_id = ?", id);
       run("UPDATE users SET name = ?, phone = ?, email = ?, profile = ? WHERE id = ?",
         name ?? user.name, phone ?? user.phone, email ?? user.email, JSON.stringify(profile ?? user.profile), id);
       return this.userById(id);
     },
-    setPassword: (id, passwordHash) => run("UPDATE users SET password_hash = ? WHERE id = ?", passwordHash, id),
+    setPassword(id, passwordHash) {
+      run("UPDATE users SET password_hash = ? WHERE id = ?", passwordHash, id);
+      run("DELETE FROM reset_tokens WHERE user_id = ?", id); // старые ссылки сброса больше не действуют
+    },
     setStatus(id, status) {
       run("UPDATE users SET status = ?, approved_at = COALESCE(approved_at, CASE WHEN ? = 'active' THEN ? END) WHERE id = ?", status, status, now(), id);
-      if (status === "blocked") run("DELETE FROM sessions WHERE user_id = ?", id);
+      if (status === "blocked") {
+        run("DELETE FROM sessions WHERE user_id = ?", id);
+        run("DELETE FROM reset_tokens WHERE user_id = ?", id);
+      }
       return this.userById(id);
     },
     touchLogin: (id) => run("UPDATE users SET last_login_at = ? WHERE id = ?", now(), id),

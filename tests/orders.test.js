@@ -144,3 +144,26 @@ test("самовывоз подставляет адрес склада на С�
   assert.deepEqual(errors, []);
   assert.equal(order.address, "г. Москва, ул. Сущевская, д. 23");
 });
+
+test("лимит количества — на итог артикула, а номер заказа из запроса не учитывается", async () => {
+  await withApp({ mail: MAIL }, async (postOrder) => {
+    assert.equal((await postOrder({ ...ORDER, items: [{ sku: "82019", qty: 999 }, { sku: "82019", qty: 999 }] })).status, 400);
+    assert.equal((await postOrder({ ...ORDER, number: "№ 5" })).status, 201);
+  });
+});
+
+test("товар не в наличии сервер не принимает", () => {
+  const catalog = loadCatalog();
+  const key = [...catalog.keys()][0];
+  catalog.set(key, { ...catalog.get(key), inStock: false });
+  const { errors } = normalizeOrder({ ...ORDER, company: COMPANY, items: [{ sku: catalog.get(key).sku, qty: 1 }] }, catalog);
+  assert.match(errors.join(" "), /Нет в наличии/);
+});
+
+test("если цена в бланке отличается от прайса, письмо менеджеру об этом говорит", async () => {
+  const { buildOrderBlanks, managerMessage } = require("../server/orders");
+  const { order } = normalizeOrder({ ...ORDER, company: COMPANY, items: [{ sku: "99916", qty: 1 }] }, loadCatalog());
+  order.number = "STYX-00001";
+  const { text } = managerMessage(order, await buildOrderBlanks(order));
+  assert.match(text, /Цены в бланке отличаются от прайса: 99916 — в бланке 427 ₽, в прайсе 490 ₽/);
+});

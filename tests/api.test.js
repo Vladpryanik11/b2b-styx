@@ -340,3 +340,83 @@ test("знак $ в названии организации не портит б
   const sheet = await (await JSZip.loadAsync(buffer)).file("xl/worksheets/sheet1.xml").async("string");
   assert.match(sheet, /ООО \$' Тест \$&amp;/);
 });
+
+test("управляющие символы в названии организации не ломают бланк xlsx", async () => {
+  const { buildBlank } = require("../server/blanks");
+  const { buffer } = await buildBlank("styx-aromaderm.xlsx", { counterparty: "ООО Ромашка\u0001\u000B", lines: [{ sku: "15000", qty: 1 }] });
+  const sheet = await (await JSZip.loadAsync(buffer)).file("xl/worksheets/sheet1.xml").async("string");
+  assert.doesNotMatch(sheet, /[\u0001\u000B]/);
+  assert.match(sheet, /ООО Ромашка/);
+});
+
+test("старые ссылки сброса не работают после смены пароля, смены email и блокировки", async () => {
+  await withApp(async (browser, { sent, db }) => {
+    const { manager, clientId } = await registerAndApprove(browser);
+    const askLink = async (email) => {
+      await browser.fork().call("POST", "/api/auth/forgot", { email });
+      return sent.filter((mail) => /Восстановление пароля/.test(mail.subject)).at(-1).text.match(/\?reset=([\w-]+)/)[1];
+    };
+    let token = await askLink(REGISTER.email);
+    assert.equal((await browser.call("POST", "/api/account/password", { current: REGISTER.password, password: "changed-pass-1" })).status, 200);
+    assert.equal((await browser.fork().call("POST", "/api/auth/reset", { token, password: "attacker-pass" })).status, 400, "после смены пароля");
+
+    token = await askLink(REGISTER.email);
+    assert.equal((await browser.call("PUT", "/api/account", { user: { name: "Анна", email: "new@example.ru", phone: "" } })).status, 400, "email без пароля не меняется");
+    assert.equal((await browser.call("PUT", "/api/account", { user: { name: "Анна", email: "new@example.ru", phone: "", current: "changed-pass-1" } })).status, 200);
+    assert.equal(sent.at(-1).to, REGISTER.email, "прежний адрес получает уведомление");
+    assert.equal((await browser.fork().call("POST", "/api/auth/reset", { token, password: "attacker-pass" })).status, 400, "после смены email");
+
+    token = await askLink("new@example.ru");
+    assert.equal((await manager.call("POST", `/api/admin/clients/${clientId}/status`, { status: "blocked" })).status, 200);
+    assert.equal((await browser.fork().call("POST", "/api/auth/reset", { token, password: "attacker-pass" })).status, 400, "после блокировки");
+    assert.ok(db);
+  });
+});
+
+test("решение менеджера по устаревшему списку не отменяет чужое: 409", async () => {
+  await withApp(async (browser) => {
+    assert.equal((await browser.call("POST", "/api/auth/register", REGISTER)).status, 201);
+    const a = browser.fork();
+    const b = browser.fork();
+    for (const m of [a, b]) assert.equal((await m.call("POST", "/api/auth/login", { email: "manager@styx.test", password: "manager-pass" })).status, 200);
+    const id = (await a.call("GET", "/api/admin/clients")).body.clients[0].id;
+    assert.equal((await a.call("POST", `/api/admin/clients/${id}/status`, { status: "blocked", from: "pending" })).status, 200);
+    assert.equal((await b.call("POST", `/api/admin/clients/${id}/status`, { status: "active", from: "pending" })).status, 409);
+    assert.equal((await b.call("GET", "/api/admin/clients")).body.clients[0].status, "blocked");
+  });
+});
+
+test("вход: с одного адреса нельзя перебирать много email без ограничения", async () => {
+  await withApp(async (browser) => {
+    let last = 0;
+    for (let i = 0; i < 51; i += 1) last = (await browser.fork().call("POST", "/api/auth/login", { email: `u${i}@example.ru`, password: "x" })).status;
+    assert.equal(last, 429);
+  });
+});
+
+test("create-manager не превращает клиента в менеджера и закрывает сессии при смене пароля", async () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const { createManager } = require("../server.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "styx-mgr-"));
+  const dbPath = path.join(dir, "styx.sqlite");
+  const db = openDb(dbPath);
+  db.createUser({ email: "client@example.ru", name: "Клиент", passwordHash: hashPassword("client-pass-1"), status: "active" });
+  const manager = db.createUser({ email: "boss@styx.test", name: "Мария", passwordHash: hashPassword("manager-pass"), role: "manager", status: "active" });
+  db.createSession("h1", manager.id, 60000);
+  db.close();
+  process.env.MANAGER_PASSWORD = "manager-pass-2";
+  try {
+    assert.throws(() => createManager({ dbPath }, " Client@Example.ru ", "Новый"), /уже зарегистрирован как клиент/);
+    createManager({ dbPath }, "boss@styx.test", "Мария Иванова");
+    const check = openDb(dbPath);
+    assert.equal(check.userByEmail("client@example.ru").role, "client");
+    assert.equal(check.userByEmail("boss@styx.test").name, "Мария Иванова");
+    assert.equal(check.sessionUser("h1"), null, "сессии менеджера закрыты");
+    check.close();
+  } finally {
+    delete process.env.MANAGER_PASSWORD;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

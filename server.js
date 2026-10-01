@@ -245,17 +245,27 @@ function backupDatabase(db, cfg) {
 
 // Менеджер создаётся из консоли сервера. Пароль — MANAGER_PASSWORD или будет сгенерирован и показан один раз.
 function createManager(cfg, email, name) {
+  email = String(email || "").trim();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) throw new Error('Использование: node server.js create-manager <email> "<имя>"');
   const db = openDb(cfg.dbPath);
   const password = process.env.MANAGER_PASSWORD || crypto.randomBytes(9).toString("base64url");
   const problem = passwordProblem(password);
   if (problem) throw new Error(problem);
-  const existing = db.userByEmail(email.toLowerCase());
+  const login = email.trim().toLowerCase();
+  const existing = db.userByEmail(login);
+  if (existing && existing.role !== "manager") {
+    db.close();
+    // Иначе клиент, заранее указавший у себя email будущего сотрудника, получил бы права менеджера.
+    throw new Error(`${login} уже зарегистрирован как клиент. Для менеджера укажите другой email.`);
+  }
   if (existing) {
+    // Повторный запуск для менеджера — смена пароля: все его сессии закрываются.
     db.setPassword(existing.id, hashPassword(password));
-    db.raw.prepare("UPDATE users SET role = 'manager', status = 'active' WHERE id = ?").run(existing.id);
+    if (name) db.raw.prepare("UPDATE users SET name = ?, status = 'active' WHERE id = ?").run(name, existing.id);
+    else db.raw.prepare("UPDATE users SET status = 'active' WHERE id = ?").run(existing.id);
+    db.deleteUserSessions(existing.id);
   } else {
-    db.createUser({ email: email.toLowerCase(), name: name || "Менеджер STYX", passwordHash: hashPassword(password), role: "manager", status: "active" });
+    db.createUser({ email: login, name: name || "Менеджер STYX", passwordHash: hashPassword(password), role: "manager", status: "active" });
   }
   db.close();
   return password;

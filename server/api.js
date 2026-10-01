@@ -78,14 +78,19 @@ function publicUser(user) {
 
 function createApi({ cfg, db, getTransport, getCatalog }) {
   const loginLimiter = createRateLimiter({ limit: 10, windowMs: 15 * 60 * 1000 });
+  // Перебор одного пароля по многим email с одного адреса: каждая попытка ещё и тратит ~32 МБ на scrypt.
+  const loginIpLimiter = createRateLimiter({ limit: 50, windowMs: 15 * 60 * 1000 });
   const mailLimiter = createRateLimiter({ limit: 5, windowMs: 60 * 60 * 1000 });
+  // Офис за одним NAT: 5 писем в час — на каждый email, и общий потолок на адрес.
+  const mailIpLimiter = createRateLimiter({ limit: 30, windowMs: 60 * 60 * 1000 });
   const registerLimiter = createRateLimiter({ limit: 10, windowMs: 60 * 60 * 1000 });
   const mail = cfg.mail || {};
   const appUrl = (cfg.appUrl || "").replace(/\/$/, "");
 
   // За прокси адрес клиента — последний в X-Forwarded-For: его дописывает сам прокси, а начало списка клиент может подделать.
   const clientIp = (req) => (cfg.trustProxy ? String(req.headers["x-forwarded-for"] || "").split(",").pop().trim() : "") || req.socket.remoteAddress || "";
-  const isSecure = (req) => cfg.cookieSecure || (cfg.trustProxy && req.headers["x-forwarded-proto"] === "https");
+  // За цепочкой прокси заголовок может быть списком «https, http»: протокол клиента — первый.
+  const isSecure = (req) => cfg.cookieSecure || (cfg.trustProxy && String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https");
   const baseUrl = (req) => appUrl || `${isSecure(req) ? "https" : "http"}://${req.headers.host}`;
   // Ссылки в письмах строятся только от APP_URL: заголовок Host присылает браузер, и подделанный Host
   // увёл бы ссылку сброса пароля на чужой сайт. Без APP_URL ссылка ведёт на localhost (для локальной проверки).
@@ -191,7 +196,7 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     const body = await readJson(req);
     const email = text(body.email, 200).toLowerCase();
     const key = `${clientIp(req)}|${email}`;
-    if (!loginLimiter.hit(key)) throw new HttpError(429, MESSAGES.tooMany);
+    if (!loginIpLimiter.hit(clientIp(req)) || !loginLimiter.hit(key)) throw new HttpError(429, MESSAGES.tooMany);
     const user = db.userByEmail(email);
     const valid = await verifyPasswordAsync(String(body.password || ""), user ? user.passwordHash : DUMMY_HASH);
     if (!user || !valid) throw new HttpError(401, MESSAGES.badLogin);
@@ -210,7 +215,7 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
   async function forgot(req, res) {
     const body = await readJson(req);
     const email = text(body.email, 200).toLowerCase();
-    if (!mailLimiter.hit(clientIp(req))) throw new HttpError(429, MESSAGES.tooMany);
+    if (!mailIpLimiter.hit(clientIp(req)) || !mailLimiter.hit(`${clientIp(req)}|${email}`)) throw new HttpError(429, MESSAGES.tooMany);
     const user = EMAIL_PATTERN.test(email) ? db.userByEmail(email) : null;
     if (user && user.status !== "blocked") {
       const { token, hash } = newToken();
@@ -262,6 +267,16 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
       if (!EMAIL_PATTERN.test(email)) throw new HttpError(400, "Проверьте email.");
       const other = db.userByEmail(email);
       if (other && other.id !== user.id) throw new HttpError(409, "Этот email уже занят другим кабинетом.");
+      // Email — это логин и адрес для сброса пароля: без пароля его сменил бы любой, у кого открыт кабинет.
+      if (email !== user.email) {
+        if (!body.user.current) throw new HttpError(400, "Для смены email укажите текущий пароль.");
+        if (!(await verifyPasswordAsync(String(body.user.current), user.passwordHash))) throw new HttpError(400, "Текущий пароль указан неверно.");
+        sendMail({
+          to: user.email,
+          subject: "Email в кабинете STYX B2B изменён",
+          text: `Здравствуйте, ${user.name}!\n\nEmail для входа в кабинет STYX B2B изменён на ${email}. Если это сделали не вы, ответьте на это письмо или свяжитесь с менеджером STYX.`
+        });
+      }
       Object.assign(changes, { name, email, phone });
     }
     let addedCompanies = [];
@@ -301,8 +316,13 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     const profile = normalizeProfile(user.profile);
     const company = profile.companies.find((item) => item.id === body.companyId);
     if (!company) throw new HttpError(400, "Выберите юрлицо из своего кабинета.");
+    // Номер и дату назначает база: из запроса берём только то, что выбирает клиент.
     const { order, errors } = normalizeOrder({
-      ...body,
+      delivery: body.delivery,
+      address: body.address,
+      comment: body.comment,
+      items: body.items,
+      promoCode: body.promoCode,
       company: { name: company.name, inn: company.inn, kpp: company.kpp, address: company.address },
       contact: { name: user.name, email: user.email, phone: user.phone }
     }, getCatalog());
@@ -361,6 +381,8 @@ function createApi({ cfg, db, getTransport, getCatalog }) {
     if (!["active", "blocked"].includes(body.status)) throw new HttpError(400, "Неизвестный статус");
     const before = db.userById(id);
     if (!before || before.role !== "client") throw new HttpError(404, "Клиент не найден");
+    // Два менеджера или две вкладки: решение, принятое по устаревшему списку, не отменяет чужое.
+    if (body.from && body.from !== before.status) throw new HttpError(409, "Статус клиента уже изменил другой менеджер. Список обновлён.");
     const user = db.setStatus(id, body.status);
     // Письмо «кабинет открыт» — при первом допуске, в том числе если заявку сначала отклонили, а потом приняли.
     if (!before.approvedAt && before.status !== "active" && user.status === "active") {

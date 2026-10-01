@@ -102,9 +102,9 @@ function normalizeStore(candidate) {
     ? { ...rawUser }
     : null;
   // Раньше у кабинета было одно юрлицо (account.company) — переносим его в список account.companies.
-  const rawCompanies = rawAccount && Array.isArray(rawAccount.companies)
-    ? rawAccount.companies
-    : rawAccount && rawAccount.company && typeof rawAccount.company === "object" ? [rawAccount.company] : [];
+  const listed = rawAccount && Array.isArray(rawAccount.companies) ? rawAccount.companies : [];
+  const legacy = rawAccount && rawAccount.company && typeof rawAccount.company === "object" ? [rawAccount.company] : [];
+  const rawCompanies = normalizeCompanies(listed).length ? listed : legacy;
   const companies = normalizeCompanies(rawCompanies);
   let account = null;
   if (user && companies.length) {
@@ -131,17 +131,29 @@ function normalizeStore(candidate) {
   };
 }
 
+// Заглушки «—» и «Адрес не указан» раньше сохранялись как реквизиты; теперь пусто, а заглушка — только на экране.
+// Объявлены функциями, а не const: store читается из localStorage раньше, чем выполнится эта строка.
+function cleanKpp(value) {
+  return value === undefined || value === null || String(value).trim() === "—" ? "" : String(value).trim();
+}
+function cleanCompanyAddress(value) {
+  return typeof value === "string" && value.trim() !== "Адрес не указан" ? value.trim() : "";
+}
+
 function companyKey(company) {
-  return `${company.inn}-${company.kpp || ""}`;
+  return `${String(company.inn).trim()}-${cleanKpp(company.kpp)}`;
 }
 
 function normalizeCompanies(candidate) {
   const seen = new Set();
   return candidate
-    .filter((item) => item && typeof item === "object" && typeof item.inn === "string" && item.inn)
+    .filter((item) => item && typeof item === "object" && (typeof item.inn === "string" || typeof item.inn === "number") && String(item.inn).trim())
     // Сырой ответ поиска (data) в кабинете не нужен: он только раздувает сохранение юрлиц.
     .map(({ data: _data, demo: _demo, ...item }) => ({
       ...item,
+      inn: String(item.inn).trim(),
+      kpp: cleanKpp(item.kpp),
+      address: cleanCompanyAddress(item.address),
       id: typeof item.id === "string" && item.id ? item.id : `company-${companyKey(item)}`,
       deliveryAddresses: normalizeAddresses(item.deliveryAddresses)
     }))
@@ -182,6 +194,12 @@ function visibleOrders() {
   return (store.orders || []).filter((order) => !company || order.companyId === company.id);
 }
 
+// Уникален и между юрлицами: адреса, загруженные в одну миллисекунду, не получат один id.
+function newAddressId() {
+  newAddressId.counter = (newAddressId.counter || 0) + 1;
+  return window.crypto?.randomUUID ? `addr-${crypto.randomUUID()}` : `addr-${Date.now()}-${newAddressId.counter}`;
+}
+
 // Адреса доставки организации: у каждого id, необязательное название, адрес; ровно один основной.
 function normalizeAddresses(candidate) {
   if (!Array.isArray(candidate)) return [];
@@ -189,7 +207,7 @@ function normalizeAddresses(candidate) {
     .filter((item) => item && typeof item.address === "string" && item.address.trim())
     .slice(0, 50)
     .map((item, index) => ({
-      id: typeof item.id === "string" && item.id ? item.id : `addr-${Date.now()}-${index}`,
+      id: typeof item.id === "string" && item.id ? item.id : newAddressId(),
       label: typeof item.label === "string" ? item.label.trim().slice(0, 60) : "",
       address: item.address.trim().slice(0, 300),
       isDefault: item.isDefault === true
@@ -216,7 +234,8 @@ function normalizeCart(candidate) {
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return {};
   return Object.fromEntries(Object.entries(candidate)
     .map(([sku, qty]) => [sku, Math.min(999, Math.floor(Number(qty)))])
-    .filter(([sku, qty]) => findVariant(sku) && qty > 0));
+    // Позиции не в наличии убрать из корзины пользователь не может (степпер скрыт) — не храним их.
+    .filter(([sku, qty]) => findVariant(sku)?.variant.inStock && qty > 0));
 }
 
 function findVariant(sku) {
@@ -285,6 +304,22 @@ function flushAccountSync() {
   clearTimeout(accountSyncTimer);
   return syncAccount();
 }
+
+// Закрытие или перезагрузка вкладки во время паузы: отправляем несохранённое в фоне, иначе правка пропадёт.
+function flushAccountSyncOnLeave() {
+  const snapshot = accountSnapshot();
+  if (!serverMode || !store.session || !snapshot || snapshot === lastSyncedAccount) return;
+  clearTimeout(accountSyncTimer);
+  fetch("/api/account", {
+    method: "PUT",
+    credentials: "same-origin",
+    keepalive: true,
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ account: JSON.parse(snapshot) })
+  }).catch(() => {});
+}
+window.addEventListener("pagehide", flushAccountSyncOnLeave);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushAccountSyncOnLeave(); });
 
 // Ответ сервера с пользователем превращается в тот же store, с которым работает весь кабинет.
 function applyServerSession(data) {
@@ -364,12 +399,12 @@ async function hashPassword(value) {
 function normalizeCompany(item) {
   const data = item.data || item;
   const name = data.name?.short_with_opf || data.name?.full_with_opf || data.name?.short || data.name || item.value || "Организация";
-  const address = data.address?.unrestricted_value || data.address?.value || data.address || "Адрес не указан";
+  const address = data.address?.unrestricted_value || data.address?.value || data.address || "";
   return {
     value: item.value || name,
     name,
     inn: data.inn || item.inn || "",
-    kpp: data.kpp || item.kpp || "—",
+    kpp: cleanKpp(data.kpp || item.kpp),
     address,
     data
   };
@@ -1170,7 +1205,7 @@ function saveDeliveryAddress({ companyId = activeCompany()?.id, id = null, label
     existing.address = address;
     if (isDefault) list.forEach((item) => { item.isDefault = item === existing; });
   } else {
-    const created = { id: `addr-${Date.now()}`, label, address, isDefault: isDefault || !list.length };
+    const created = { id: newAddressId(), label, address, isDefault: isDefault || !list.length };
     if (created.isDefault) list.forEach((item) => { item.isDefault = false; });
     list.push(created);
   }
@@ -1190,7 +1225,7 @@ function addressItemsHtml(company) {
       <div class="address-item-actions">
         ${item.isDefault ? "" : `<button type="button" class="text-button" data-address-action="default" ${companyAttr} data-address-id="${escapeHtml(item.id)}">Сделать основным</button>`}
         <button type="button" class="text-button" data-address-action="edit" ${companyAttr} data-address-id="${escapeHtml(item.id)}">Изменить</button>
-        <button type="button" class="text-button text-button-danger" data-address-action="delete" ${companyAttr} data-address-id="${escapeHtml(item.id)}">${confirmDeleteAddressId === item.id ? "Точно удалить?" : "Удалить"}</button>
+        <button type="button" class="text-button text-button-danger" data-address-action="delete" ${companyAttr} data-address-id="${escapeHtml(item.id)}">${confirmDeleteAddressId === `${company.id}:${item.id}` ? "Точно удалить?" : "Удалить"}</button>
       </div>
     </div>`).join("")
     : `<div class="empty-state">Адресов пока нет. Добавьте склад, магазин или офис, куда привозить заказы.</div>`;
@@ -1269,10 +1304,11 @@ function handleAddressAction(button) {
   }
   if (action === "delete") {
     // Удаление в два нажатия: первое спрашивает подтверждение прямо на кнопке.
-    if (confirmDeleteAddressId !== id) {
-      confirmDeleteAddressId = id;
+    // Ключ с юрлицом: в «Все юрлица» подтверждается и фокусируется кнопка только этого адреса.
+    if (confirmDeleteAddressId !== `${company.id}:${id}`) {
+      confirmDeleteAddressId = `${company.id}:${id}`;
       renderAddresses();
-      $(`[data-address-action='delete'][data-address-id='${CSS.escape(id)}']`)?.focus();
+      $(`[data-address-action='delete'][data-company-id='${CSS.escape(company.id)}'][data-address-id='${CSS.escape(id)}']`)?.focus();
       return;
     }
     confirmDeleteAddressId = null;
@@ -1403,8 +1439,17 @@ function openProfileModal() {
   $("#profile-edit-name").value = user.name;
   $("#profile-edit-email").value = user.email;
   $("#profile-edit-phone").value = user.phone || "";
+  $("#profile-edit-password").value = "";
+  syncProfilePasswordField();
   setMessage("#profile-message", "");
   openModal("profile-modal", "#profile-edit-name");
+}
+
+// На сервере email — это логин: сменить его можно только с текущим паролем.
+function syncProfilePasswordField() {
+  const changed = $("#profile-edit-email").value.trim().toLowerCase() !== (store.account?.user.email || "").toLowerCase();
+  $("#profile-password-wrap").hidden = !(serverMode && changed);
+  $("#profile-edit-password").required = serverMode && changed;
 }
 
 async function handleProfileSave(event) {
@@ -1427,8 +1472,13 @@ async function handleProfileSave(event) {
   if (serverMode) {
     const button = event.submitter;
     if (button) button.disabled = true;
-    const { ok, data } = await apiRequest("PUT", "/api/account", { user: { name, email, phone } });
+    const current = $("#profile-edit-password").value;
+    const { ok, status, data } = await apiRequest("PUT", "/api/account", { user: { name, email, phone, ...(current ? { current } : {}) } });
     if (button) button.disabled = false;
+    if (status === 401 || status === 403) {
+      endServerSession(data.error || "Сессия закончилась. Войдите снова.");
+      return;
+    }
     if (!ok) {
       setMessage("#profile-message", data.error || "Профиль не сохранён.");
       return;
@@ -1579,6 +1629,7 @@ function bindEvents() {
   $("#register-form").addEventListener("submit", handleRegister);
   $("#order-form").addEventListener("submit", handleCreateOrder);
   $("#profile-form").addEventListener("submit", handleProfileSave);
+  $("#profile-edit-email").addEventListener("input", syncProfilePasswordField);
   $("#order-delivery").addEventListener("change", () => { toggleAddressField(); setMessage("#order-message", ""); });
 
   Object.keys(ADDRESS_FIELDS).forEach((key) => {
@@ -1812,7 +1863,8 @@ function bindEvents() {
     if (!action) return;
     if (action === "logout") {
       if (serverMode) {
-        apiRequest("POST", "/api/auth/logout", {});
+        // Сначала сохраняем последние правки юрлиц и адресов, потом закрываем сессию.
+        flushAccountSync().finally(() => apiRequest("POST", "/api/auth/logout", {}));
         // При выходе корзина и промокод не переходят к следующему, кто войдёт с этого компьютера.
         store.cart = {};
         resetPromo();

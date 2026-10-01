@@ -1,6 +1,9 @@
 // Профиль клиента на сервере: юрлица и адреса доставки в том же виде, что в кабинете (app.js).
 // Всё, что приходит из браузера, обрезается и проверяется здесь.
-const text = (value, max) => (typeof value === "string" ? value.trim().slice(0, max) : "");
+// Управляющие символы (вставка из Word/Excel) заменяем пробелом: они ломают бланк xlsx и письмо.
+const crypto = require("node:crypto");
+
+const text = (value, max) => (typeof value === "string" ? value.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, max) : "");
 
 const MAX_COMPANIES = 30;
 const MAX_ADDRESSES = 50;
@@ -10,7 +13,7 @@ function normalizeAddresses(list) {
     .filter((item) => item && typeof item.address === "string" && item.address.trim())
     .slice(0, MAX_ADDRESSES)
     .map((item, index) => ({
-      id: text(item.id, 60) || `addr-${Date.now()}-${index}`,
+      id: text(item.id, 60) || `addr-${crypto.randomUUID()}`,
       label: text(item.label, 60),
       address: text(item.address, 300),
       isDefault: item.isDefault === true
@@ -25,7 +28,8 @@ function normalizeCompany(item) {
   if (!item || typeof item !== "object") return null;
   const inn = text(item.inn, 12);
   if (!/^\d{10}(\d{2})?$/.test(inn)) return null;
-  const kpp = text(item.kpp, 9);
+  // Заглушки «—» и «Адрес не указан» из старых версий кабинета — не реквизиты.
+  const kpp = text(item.kpp, 9) === "—" ? "" : text(item.kpp, 9);
   return {
     id: text(item.id, 80) || `company-${inn}-${kpp}`,
     name: text(item.name, 300) || text(item.value, 300) || `ИНН ${inn}`,
@@ -33,7 +37,7 @@ function normalizeCompany(item) {
     inn,
     kpp,
     ogrn: text(item.ogrn, 15),
-    address: text(item.address, 500),
+    address: text(item.address, 500) === "Адрес не указан" ? "" : text(item.address, 500),
     deliveryAddresses: normalizeAddresses(item.deliveryAddresses)
   };
 }
