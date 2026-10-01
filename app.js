@@ -6,6 +6,7 @@ const ACTIVE_VIEW_KEY = "styx-b2b-view-v1";
 const DADATA_PROXY_URL = "/api/dadata/party";
 const ADDRESS_SUGGEST_URL = "/api/dadata/address";
 const ADDRESS_CLEAN_URL = "/api/dadata/clean-address";
+const ORDERS_URL = "/api/orders";
 const ADDRESS_HINT = "Начните вводить адрес — появятся подсказки.";
 // Значения переключателя юрлиц: «Все юрлица» и пункт «Добавить юрлицо…».
 const ALL_COMPANIES = "all";
@@ -60,6 +61,7 @@ const PICKUP_ADDRESS = "г. Москва, ул. Сущевская, д. 23";
 const PROMO_CODES = { XSIZE: 10, LANDGROUP: 10 };
 
 const COMPLETED_STATUS = "Завершён";
+const NOT_SENT_STATUS = "Не отправлен";
 const priceFormatter = new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 });
 const formatPrice = (value) => priceFormatter.format(Number(value) || 0);
 
@@ -510,7 +512,7 @@ function orderTotalLabel(order) {
 }
 
 function orderRow(order) {
-  const statusClass = order.status === COMPLETED_STATUS ? "done" : "work";
+  const statusClass = order.status === COMPLETED_STATUS ? "done" : order.status === NOT_SENT_STATUS ? "warn" : "work";
   const positions = Array.isArray(order.items) ? order.items.length : 0;
   const summary = positions ? ` · ${positions} ${plural(positions, ["позиция", "позиции", "позиций"])}` : "";
   // В режиме «Все юрлица» в строке видно, от какого юрлица заказ.
@@ -785,8 +787,42 @@ function selectedOrderAddress() {
   return { address: $("#order-address").value.trim(), isNew: true };
 }
 
-function handleCreateOrder(event) {
+// Отправка заказа на сервер: он делит заказ по юрлицам STYX и отправляет менеджеру письмо с бланками.
+// Возвращает { sent: true } или { sent: false, reason } — заказ тогда сохраняется в кабинете как «Не отправлен».
+// { error } — сервер отклонил заказ (например, позиции нет в каталоге), сохранять его нельзя.
+async function sendOrder(order, company) {
+  if (IS_DEMO) return { sent: false, reason: "в демо-версии письмо не отправляется" };
+  const user = store.account.user;
+  try {
+    const response = await fetch(ORDERS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        number: order.number,
+        date: order.date,
+        company: { name: companyTitle(company), inn: company.inn, kpp: company.kpp, address: company.address },
+        contact: { name: user.name, email: user.email, phone: user.phone || "" },
+        delivery: order.delivery,
+        address: order.address,
+        comment: order.comment,
+        items: order.items.map(({ sku, qty }) => ({ sku, qty })),
+        promoCode: order.promoCode || ""
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok) return { sent: true };
+    if (response.status === 400) return { error: payload.error || "Сервер не принял заказ." };
+    const reasons = { 404: "сервер заказов недоступен", 503: "почта для заказов на сервере не настроена" };
+    return { sent: false, reason: reasons[response.status] || "письмо менеджеру не отправилось" };
+  } catch {
+    return { sent: false, reason: "сервер заказов недоступен" };
+  }
+}
+
+async function handleCreateOrder(event) {
   event.preventDefault();
+  const submitButton = $("#order-submit");
+  if (submitButton.disabled) return;
   const delivery = $("#order-delivery").value;
   const { address, isNew: isNewAddress } = selectedOrderAddress();
   const comment = $("#order-comment").value.trim();
@@ -819,7 +855,7 @@ function handleCreateOrder(event) {
   const discount = promoDiscount(subtotal);
   const total = subtotal - discount;
   const company = companyById(orderCompanyId);
-  store.orders.push({
+  const order = {
     number: orderNumber,
     companyId: company.id,
     companyName: companyTitle(company),
@@ -833,7 +869,18 @@ function handleCreateOrder(event) {
     ...(appliedPromo ? { promoCode: appliedPromo.code, discountPercent: appliedPromo.percent, discount } : {}),
     total,
     status: "В работе"
-  });
+  };
+  submitButton.disabled = true;
+  setMessage("#order-message", "Отправляем заказ…");
+  const result = await sendOrder(order, company);
+  submitButton.disabled = false;
+  if (result.error) {
+    setMessage("#order-message", `Заказ не отправлен: ${result.error}`);
+    return;
+  }
+  setMessage("#order-message", "");
+  if (!result.sent) order.status = IS_DEMO ? order.status : NOT_SENT_STATUS;
+  store.orders.push(order);
   if (delivery === "Доставка" && isNewAddress && $("#order-save-address").checked) {
     saveDeliveryAddress({ companyId: company.id, label: "", address, isDefault: !deliveryAddresses(company.id).length });
   }
@@ -852,7 +899,8 @@ function handleCreateOrder(event) {
   lastFocusedElement = null;
   navigateTo("orders");
   $("#orders-view h1").focus();
-  showToast(companies().length > 1 ? `Заказ ${orderNumber} от ${companyTitle(company)} сохранён` : `Заказ ${orderNumber} сохранён`);
+  const saved = companies().length > 1 ? `Заказ ${orderNumber} от ${companyTitle(company)}` : `Заказ ${orderNumber}`;
+  showToast(result.sent ? `${saved} отправлен менеджеру` : `${saved} сохранён, но ${result.reason}`);
 }
 
 // ---------- Адрес доставки: подсказки и стандартизация DaData ----------
@@ -1142,7 +1190,25 @@ function openOrderDetails(number) {
     ${order.comment ? `<p class="order-comment"><span>Комментарий</span>${escapeHtml(order.comment)}</p>` : ""}`;
   $("#order-details-total").textContent = orderTotalLabel(order);
   $("[data-action='repeat-order']").hidden = !items.length;
+  $("[data-action='resend-order']").hidden = order.status !== NOT_SENT_STATUS || !items.length;
   openModal("order-details-modal", "#order-details-modal .modal-close");
+}
+
+// Повторная отправка заказа, который не ушёл менеджеру (сервер был недоступен или почта не настроена).
+async function resendOrder() {
+  const order = store.orders.find((item) => item.number === openedOrderNumber);
+  const button = $("[data-action='resend-order']");
+  if (!order || button.disabled) return;
+  button.disabled = true;
+  const result = await sendOrder(order, companyById(order.companyId) || { name: order.companyName });
+  button.disabled = false;
+  if (result.sent) {
+    order.status = "В работе";
+    saveStore();
+    renderAccount();
+    openOrderDetails(order.number);
+  }
+  showToast(result.sent ? `Заказ ${order.number} отправлен менеджеру` : `Заказ ${order.number} не отправлен: ${result.error || result.reason}`);
 }
 
 function repeatOrder() {
@@ -1508,6 +1574,7 @@ function bindEvents() {
     if (action === "new-order") openOrderModal();
     if (action === "close-modal") closeModal();
     if (action === "repeat-order") repeatOrder();
+    if (action === "resend-order") resendOrder();
     if (action === "clean-address") cleanAddress(event.target.closest("[data-action]").dataset.addressField || "order");
     if (action === "add-address") openAddressModal(null, event.target.closest("[data-action]").dataset.companyId || activeCompany()?.id);
     if (action === "add-company") openCompanyModal();

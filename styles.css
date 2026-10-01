@@ -148,6 +148,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .order-status { width: fit-content; padding: 6px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
 .order-status.work { color: #986c19; background: #fff3d5; }
 .order-status.done { color: var(--green-dark); background: var(--green-soft); }
+.order-status.warn { color: #a12c2c; background: #fde8e8; }
 .empty-state { padding: 34px 15px; color: var(--muted); text-align: center; font-size: 14px; }
 .profile-grid { display: grid; grid-template-columns: .8fr 1.2fr; gap: 18px; }
 .profile-card, .profile-company-card { padding: 28px; }
@@ -489,3 +490,11 @@ h1, h2, h3, h4 { line-height: 1.2; text-wrap: balance; }
   .company-switch select { max-width: 180px; }
 }
 .logout-link { display: block; margin: 14px auto 0; color: var(--muted); }
+
+/* Заказ, который не ушёл менеджеру: метка и кнопка повторной отправки */
+.order-status { white-space: nowrap; }
+#order-details-modal .order-footer { flex-wrap: wrap; }
+#order-details-modal .order-footer [data-action="resend-order"] { margin-left: auto; }
+@media (max-width: 640px) {
+  #order-details-modal .order-footer [data-action="resend-order"] { order: 3; width: 100%; margin-left: 0; }
+}
